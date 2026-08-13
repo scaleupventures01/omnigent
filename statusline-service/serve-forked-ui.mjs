@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -12,6 +12,7 @@ const METRICS_HOST = "127.0.0.1";
 const METRICS_PORT = 6789;
 const METRICS_PATH = "/statusline";
 const METRICS_TIMEOUT_MS = 3000;
+const RATELIMITS_FILE = "/Users/calvinwilliamsjr/.claude/statusline-ratelimits.json";
 const STATIC_ROOT = "/Users/calvinwilliamsjr/Domains/infra/omnigent/omnigent/server/static/web-ui";
 const INDEX_FILE = path.join(STATIC_ROOT, "index.html");
 const PROXY_PREFIXES = ["/v1", "/api", "/auth", "/health"];
@@ -142,6 +143,36 @@ function serveStatuslineMetrics(request, response) {
     settled = true;
     upstreamRequest.destroy();
   });
+}
+
+// The Claude Code status line writes account-wide rate limits to RATELIMITS_FILE;
+// read it fresh per request so the web bar always sees the latest capture.
+async function serveRateLimits(request, response) {
+  let raw;
+  try {
+    raw = await readFile(RATELIMITS_FILE, "utf8");
+    JSON.parse(raw);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      logError("rate-limit metrics unavailable", error);
+    }
+    const body = '{"error":"Rate-limit metrics unavailable"}\n';
+    response.writeHead(404, {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
+      "Cache-Control": "no-store",
+      Connection: "close",
+    });
+    response.end(body);
+    return;
+  }
+
+  response.writeHead(200, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(raw),
+    "Cache-Control": "no-store",
+  });
+  response.end(raw);
 }
 
 function proxyHttpRequest(request, response, targetPath) {
@@ -285,6 +316,11 @@ async function handleHttpRequest(request, response) {
 
   if (request.method === "GET" && parsed.pathname === "/__metrics/statusline") {
     serveStatuslineMetrics(request, response);
+    return;
+  }
+
+  if (request.method === "GET" && parsed.pathname === "/__metrics/ratelimits") {
+    await serveRateLimits(request, response);
     return;
   }
 

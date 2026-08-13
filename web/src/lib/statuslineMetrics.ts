@@ -24,6 +24,59 @@ export function finiteStatusNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+export interface RateLimitsData {
+  captured?: number;
+  five_hour?: {
+    used_percentage?: number;
+    resets_at?: number;
+  };
+  seven_day?: {
+    used_percentage?: number;
+    resets_at?: number;
+  };
+}
+
+export interface FreshRateLimits {
+  fiveHourPct: number;
+  fiveHourResets: number;
+  sevenDayPct: number;
+  sevenDayResets: number;
+}
+
+/** Validated rate limits, or null when fields are missing or captured is stale. */
+export function freshRateLimits(data: RateLimitsData | null, nowSeconds: number): FreshRateLimits | null {
+  if (!data || !finiteStatusNumber(data.captured) || nowSeconds - data.captured > 3600) {
+    return null;
+  }
+  const fiveHourPct = data.five_hour?.used_percentage;
+  const fiveHourResets = data.five_hour?.resets_at;
+  const sevenDayPct = data.seven_day?.used_percentage;
+  const sevenDayResets = data.seven_day?.resets_at;
+  if (
+    !finiteStatusNumber(fiveHourPct) ||
+    !finiteStatusNumber(fiveHourResets) ||
+    !finiteStatusNumber(sevenDayPct) ||
+    !finiteStatusNumber(sevenDayResets)
+  ) {
+    return null;
+  }
+  return { fiveHourPct, fiveHourResets, sevenDayPct, sevenDayResets };
+}
+
+/** 5h window remaining: "Xh" at an hour or more, else "Xm", or "now". */
+export function rateLimitLeftHours(secondsLeft: number): string {
+  if (secondsLeft <= 0) return "now";
+  if (secondsLeft < 3600) return `${Math.floor(secondsLeft / 60)}m`;
+  return `${Math.floor(secondsLeft / 3600)}h`;
+}
+
+/** 7d window remaining: "Xd" at a day or more, else "Xh". */
+export function rateLimitLeftDays(secondsLeft: number): string {
+  if (secondsLeft <= 0) return "now";
+  if (secondsLeft >= 86400) return `${Math.floor(secondsLeft / 86400)}d`;
+  return `${Math.floor(secondsLeft / 3600)}h`;
+}
+
 export function metricPercent(value: unknown, target: unknown): number | null {
   if (!finiteStatusNumber(value) || !finiteStatusNumber(target) || target <= 0) return null;
   return (value / target) * 100;
