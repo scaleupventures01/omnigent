@@ -582,6 +582,7 @@ def register_events_routes(
             runner_client = await _get_runner_client(
                 session_id,
                 runner_router,
+                conversation=conv,
             )
             interrupt_delivered = False
             if runner_client is not None:
@@ -762,6 +763,7 @@ def register_events_routes(
                 runner_router,
                 {"type": _COMPACT_TYPE},
                 timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
+                conversation=conv,
             )
             if runner_result is not None and runner_result.status_code == 200:
                 return {"queued": False}
@@ -924,6 +926,7 @@ def register_events_routes(
                 session_id,
                 runner_router,
                 forward_body,
+                conversation=conv,
             )
             if (
                 conv.kind == "sub_agent"
@@ -1111,7 +1114,7 @@ def register_events_routes(
             # call_ids no-op at the scaffold; the harness re-emits the
             # completed function_call + output on resume, so history is
             # written through the normal stream path (no separate persist).
-            runner_client = await _get_runner_client(session_id, runner_router)
+            runner_client = await _get_runner_client(session_id, runner_router, conversation=conv)
             if runner_client is None:
                 raise OmnigentError(
                     "No runner bound to this session; cannot deliver the tool result.",
@@ -1160,7 +1163,7 @@ def register_events_routes(
                 raise _session_not_found()
             conv = conv_after_wake
             _runner_needs_session_init = True
-        runner_client = await _get_runner_client(session_id, runner_router)
+        runner_client = await _get_runner_client(session_id, runner_router, conversation=conv)
         # Managed-launch rendezvous: a ``host_type="managed"`` create
         # returns before the sandbox exists, so the first message (the
         # Web UI auto-sends the composer prompt right after navigate)

@@ -5279,6 +5279,8 @@ async def _forward_session_change_to_runner_impl(
     runner_router: Any,
     event: dict[str, Any],
     timeout_s: float = 5.0,
+    *,
+    conversation: Conversation | None = None,
 ) -> _RunnerForwardResult | None:
     """
     Best-effort POST a control event to the bound runner.
@@ -5325,10 +5327,13 @@ async def _forward_session_change_to_runner_impl(
         runner client could be resolved or the POST failed at the
         transport layer (in both cases the AP-side persisted value /
         operation is the authoritative fallback).
+    :param conversation: An already-loaded conversation to reuse for runner
+        routing, sparing a redundant ``get_conversation`` on the hot
+        per-event path. ``None`` re-reads inside the router as before.
     """
     from omnigent.runtime import get_runner_client
 
-    runner_client = await _get_runner_client(session_id, runner_router)
+    runner_client = await _get_runner_client(session_id, runner_router, conversation=conversation)
     if runner_client is None:
         runner_client = cast("httpx.AsyncClient | None", get_runner_client())
     if runner_client is None:
