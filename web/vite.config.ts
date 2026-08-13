@@ -126,6 +126,34 @@ if (useAuth) {
 
 const proxyConfig = createProxyConfig(OMNIGENT_URL, useAuth);
 
+const POC_STATUSLINE_PATH =
+  "/Users/calvinwilliamsjr/.claude/statusline-data.json";
+
+function pocStatuslineData(): Plugin {
+  return {
+    name: "poc-statusline-data",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url?.split("?")[0] !== "/__poc/statusline") return next();
+
+        try {
+          const body = readFileSync(POC_STATUSLINE_PATH, "utf8");
+          JSON.parse(body);
+          res.statusCode = 200;
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.end(body);
+        } catch {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ error: "statusline data unavailable" }));
+        }
+      });
+    },
+  };
+}
+
 // PWA web app manifest. Static (the app's identity doesn't change per build);
 // emitted by the plugin below — NOT placed in `public/`, because `public/` is
 // copied into the embed-island build too (vite.embed.config.ts), and the embed
@@ -253,7 +281,13 @@ function safariLookbehindWorkarounds(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [emitPwaAssets(), safariLookbehindWorkarounds(), react(), tailwindcss()],
+  plugins: [
+    pocStatuslineData(),
+    emitPwaAssets(),
+    safariLookbehindWorkarounds(),
+    react(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
