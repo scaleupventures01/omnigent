@@ -271,6 +271,40 @@ async def test_sync_after_resume_posts_spawn_model() -> None:
     assert state.posted_model == "gpt-5.4-mini"
 
 
+@pytest.mark.asyncio
+async def test_sync_after_resume_posts_normalized_startup_effort() -> None:
+    """Startup mirrors Codex ``max`` as Omnigent ``xhigh`` immediately.
+
+    A resumed app-server thread already carries its effective reasoning effort.
+    The forwarder must mirror that value during startup, without waiting for a
+    later ``thread/settings/updated`` notification. Omnigent's supported effort
+    ceiling is ``xhigh``, so Codex's equivalent ``max`` value is normalized at
+    this boundary.
+    """
+    client = _RecordingClient()
+    state = fwd._CodexForwarderState()
+    state.note_resume_response(
+        {"result": {"model": "gpt-5.6-sol", "reasoningEffort": "max"}}
+    )
+
+    await fwd._sync_reasoning_effort_change(
+        client,
+        session_id="conv_x",
+        forwarder_state=state,
+    )
+
+    assert client.posts == [
+        (
+            "/v1/sessions/conv_x/events",
+            {
+                "type": "external_reasoning_effort_change",
+                "data": {"reasoning_effort": "xhigh"},
+            },
+        )
+    ]
+    assert state.posted_effort == "xhigh"
+
+
 def test_thread_settings_updated_records_effort_and_collaboration_mode() -> None:
     """
     ``thread/settings/updated`` records Codex's live thinking settings.
