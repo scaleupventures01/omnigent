@@ -206,9 +206,13 @@ import {
   formatMoneyComma,
   formatMoneyK,
   formatSignedMoneyK,
+  freshRateLimits,
   metricPercent,
   progressBar,
   qualifiedPipelineValue,
+  rateLimitLeftDays,
+  rateLimitLeftHours,
+  type RateLimitsData,
   type StatuslineData,
 } from "@/lib/statuslineMetrics";
 
@@ -4074,6 +4078,7 @@ function ComposerStatusLine({
   // the other status-line values rather than a separate fetch.
   const gitBranch = useChatStore((s) => s.gitBranch);
   const [statusline, setStatusline] = useState<StatuslineData | null>(null);
+  const [rateLimits, setRateLimits] = useState<RateLimitsData | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -4091,8 +4096,27 @@ function ComposerStatusLine({
       }
     }
 
+    async function loadRateLimits() {
+      setNow(Date.now());
+      try {
+        const response = await fetch("/__metrics/ratelimits", { cache: "no-store" });
+        if (!response.ok) {
+          if (mounted) setRateLimits(null);
+          return;
+        }
+        const data = (await response.json()) as RateLimitsData;
+        if (mounted) setRateLimits(data);
+      } catch {
+        if (mounted) setRateLimits(null);
+      }
+    }
+
     void loadStatusline();
-    const interval = window.setInterval(() => void loadStatusline(), 30_000);
+    void loadRateLimits();
+    const interval = window.setInterval(() => {
+      void loadStatusline();
+      void loadRateLimits();
+    }, 30_000);
     return () => {
       mounted = false;
       window.clearInterval(interval);
@@ -4138,6 +4162,11 @@ function ComposerStatusLine({
         ? `NT ${formatSignedMoneyK(ntDaily)} ${ntDaily >= 0 ? "▲" : "▼"}`
         : "NT -";
 
+  const rl = freshRateLimits(rateLimits, now / 1000);
+  // Same severity thresholds as the terminal status line: red >=90, yellow >=70.
+  const rlUsedClass = (pct: number) =>
+    pct >= 90 ? "text-red-400" : pct >= 70 ? "text-yellow-400" : undefined;
+
   const metricSegments = [
     <span key="cash" className={cn("flex-none whitespace-nowrap", cashClass)}>
       Cash {formatMoneyK(cashValue)}
@@ -4156,10 +4185,21 @@ function ComposerStatusLine({
     </span>,
     <span
       key="limits"
-      className="flex-none whitespace-nowrap text-muted-foreground"
-      title="not available in the web client"
+      className={cn("flex-none whitespace-nowrap", rl == null && "text-muted-foreground")}
+      title={rl == null ? "not available in the web client" : undefined}
     >
-      {"5h n/a  wk n/a"}
+      {rl == null ? (
+        "5h n/a  wk n/a"
+      ) : (
+        <>
+          {"5h "}
+          <span className={rlUsedClass(rl.fiveHourPct)}>{Math.round(rl.fiveHourPct)}%</span>
+          {` (${rateLimitLeftHours(rl.fiveHourResets - now / 1000)} left)  `}
+          {"wk "}
+          <span className={rlUsedClass(rl.sevenDayPct)}>{Math.round(rl.sevenDayPct)}%</span>
+          {` (${rateLimitLeftDays(rl.sevenDayResets - now / 1000)} left)`}
+        </>
+      )}
     </span>,
   ];
 
