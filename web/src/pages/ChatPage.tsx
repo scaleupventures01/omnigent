@@ -4082,7 +4082,7 @@ function ComposerStatusLine({
     async function loadStatusline() {
       setNow(Date.now());
       try {
-        const response = await fetch("http://127.0.0.1:6789/statusline", { cache: "no-store" });
+        const response = await fetch("/__metrics/statusline", { cache: "no-store" });
         if (!response.ok) return;
         const data = (await response.json()) as StatuslineData;
         if (mounted) setStatusline(data);
