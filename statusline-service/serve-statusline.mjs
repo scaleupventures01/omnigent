@@ -7,6 +7,8 @@ const DATA_PATH = '/Users/calvinwilliamsjr/.claude/statusline-data.json';
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:6767',
   'http://127.0.0.1:6767',
+  'http://localhost:6768',
+  'http://127.0.0.1:6768',
 ]);
 
 function corsHeaders(request) {
