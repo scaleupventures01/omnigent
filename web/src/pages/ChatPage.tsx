@@ -209,6 +209,17 @@ import { GoalControl, GoalStatusPill, useGoalState, type Goal } from "@/componen
 import { copyText } from "@/lib/clipboard";
 import { showToast } from "@/components/ui/toast";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import {
+  displayMetricPercent,
+  finiteStatusNumber,
+  formatMoneyComma,
+  formatMoneyK,
+  formatSignedMoneyK,
+  metricPercent,
+  progressBar,
+  qualifiedPipelineValue,
+  type StatuslineData,
+} from "@/lib/statuslineMetrics";
 
 // Matches both wordings the native executors emit: "[Attached: <path>]"
 // (claude/pi/cursor) and "[Attached file: <path>]" (codex). Capturing group
@@ -4234,39 +4245,102 @@ function ComposerStatusLine({
   // alongside contextWindow — so the branch reads from the same store as
   // the other status-line values rather than a separate fetch.
   const gitBranch = useChatStore((s) => s.gitBranch);
+  const [statusline, setStatusline] = useState<StatuslineData | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
-  // Host binding drives whether the HostBadge has anything to show — read it
-  // from the same source the badge does so the tray's render guard matches.
-  const { session } = useSession(conversationId);
-  const isHostBound = !!session?.hostId;
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadStatusline() {
+      setNow(Date.now());
+      try {
+        const response = await fetch("http://127.0.0.1:6789/statusline", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = (await response.json()) as StatuslineData;
+        if (mounted) setStatusline(data);
+      } catch {
+        // Keep the last successful value so stale data is visibly muted.
+      }
+    }
+
+    void loadStatusline();
+    const interval = window.setInterval(() => void loadStatusline(), 30_000);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   const showBranch = !!conversationId && !!gitBranch;
   // Host indicator (green/red dot + host name), left of the worktree branch.
   // Hidden on sub-agent sessions — the header's child-session slot owns the
   // back affordance there, mirroring where this badge used to live. HostBadge
-  // self-hides when the session isn't host-bound, so also gate on isHostBound
-  // (below) before treating the badge as a reason to render the tray.
+  // self-hides when the session isn't host-bound.
   const showHost = !!conversationId && !isSubAgentSession;
   const showPlanMode = !!conversationId && codexPlanMode;
   const showGoal = !!conversationId && goal != null;
   // contextWindow > 0: the SSE path validates it but the snapshot path doesn't, and 0/0 → "NaN%".
   const showRing =
     !!conversationId && contextWindow != null && contextWindow > 0 && tokensUsed != null;
-  // A host-bound session shows the badge, so the tray must render for it even
-  // with no branch/ring yet — otherwise the host + context footer vanishes for
-  // sessions with no worktree branch (e.g. codex) until the ring populates.
-  // This also keeps the offline host's reconnect affordance on screen, since
-  // the badge is where it lives and an unreachable session often has no
-  // branch/ring at all.
-  const showHostBadge = showHost && isHostBound;
-  if (!showBranch && !showPlanMode && !showGoal && !showRing && !showHostBadge) return null;
+
+  const goalRunrate = statusline?.goal?.runrate;
+  const goalTarget = statusline?.goal?.target;
+  const goalPercent = metricPercent(goalRunrate, goalTarget);
+  const qualifiedPipeline = qualifiedPipelineValue(statusline);
+  const pipelineTarget = statusline?.pipeline?.target ?? goalTarget;
+  const pipelinePercent = metricPercent(qualifiedPipeline, pipelineTarget);
+  const cashValue = statusline?.cash?.value;
+  const ntDaily = statusline?.nt?.daily;
+  const ntPositions = statusline?.nt?.positions;
+  const stale =
+    !finiteStatusNumber(statusline?.updated) || now / 1000 - statusline.updated > 1800;
+  const cashClass = stale
+    ? "text-muted-foreground"
+    : !finiteStatusNumber(cashValue)
+      ? "text-muted-foreground"
+      : cashValue < 3000
+        ? "text-red-400"
+        : cashValue < 6000
+          ? "text-yellow-400"
+          : "text-green-400";
+  const nautilusLabel =
+    finiteStatusNumber(ntPositions) && ntPositions === 0
+      ? "NT flat"
+      : finiteStatusNumber(ntPositions) && ntPositions !== 0 && finiteStatusNumber(ntDaily)
+        ? `NT ${formatSignedMoneyK(ntDaily)} ${ntDaily >= 0 ? "▲" : "▼"}`
+        : "NT -";
+
+  const metricSegments = [
+    <span key="cash" className={cn("flex-none whitespace-nowrap", cashClass)}>
+      Cash {formatMoneyK(cashValue)}
+    </span>,
+    <span key="goal" className="flex-none whitespace-nowrap">
+      Goal <span className="text-green-400">{progressBar(goalPercent)}</span>{" "}
+      {displayMetricPercent(goalPercent)} {formatMoneyComma(goalRunrate)}/{formatMoneyK(goalTarget)}
+    </span>,
+    <span key="nautilus" className="flex-none whitespace-nowrap">
+      {nautilusLabel}
+    </span>,
+    <span key="pipeline" className="flex-none whitespace-nowrap">
+      Pipeline <span className="text-yellow-400">{progressBar(pipelinePercent)}</span>{" "}
+      {displayMetricPercent(pipelinePercent)} {formatMoneyK(qualifiedPipeline)}/
+      {formatMoneyK(pipelineTarget)}
+    </span>,
+    <span
+      key="limits"
+      className="flex-none whitespace-nowrap text-muted-foreground"
+      title="not available in the web client"
+    >
+      {"5h n/a  wk n/a"}
+    </span>,
+  ];
 
   return (
     <div
       data-testid="composer-status-line"
       className={cn(
         // -mt-4 tucks under the card; pt-5.5 keeps content below the overlap.
-        "mx-auto -mt-4 flex w-full items-center gap-3 rounded-b-2xl px-4 pb-1.5 pt-5.5",
+        "mx-auto -mt-4 flex w-full shrink-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-b-2xl px-4 pb-1.5 pt-5.5",
         CHAT_COLUMN_WIDTH,
       )}
     >
@@ -4297,6 +4371,15 @@ function ComposerStatusLine({
         )}
         {showGoal && goal && <GoalStatusPill goal={goal} />}
         {showRing && <ContextRing contextWindow={contextWindow} tokensUsed={tokensUsed} />}
+      </div>
+      <div
+        data-testid="omni-metrics"
+        className={cn(
+          "flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm font-normal",
+          stale ? "text-muted-foreground [&_*]:!text-muted-foreground" : "text-foreground",
+        )}
+      >
+        {metricSegments}
       </div>
     </div>
   );
