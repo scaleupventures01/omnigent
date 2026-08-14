@@ -10368,8 +10368,8 @@ async def test_web_launch_resolves_configured_codex_args(
     (config_home / "config.yaml").write_text(
         yaml.safe_dump(
             {
-                "harnesses": {
-                    "codex": {"args": [bypass, "--global-codex-flag"]},
+                "harness": {
+                    "codex-native": {"args": [bypass, "--global-codex-flag"]},
                 }
             }
         ),
@@ -10378,8 +10378,8 @@ async def test_web_launch_resolves_configured_codex_args(
     (local_config_dir / "config.yaml").write_text(
         yaml.safe_dump(
             {
-                "harnesses": {
-                    "codex": {"args": [bypass, "--workspace-codex-flag"]},
+                "harness": {
+                    "codex-native": {"args": [bypass, "--workspace-codex-flag"]},
                 }
             }
         ),
