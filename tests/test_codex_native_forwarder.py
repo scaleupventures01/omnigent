@@ -272,7 +272,10 @@ async def test_sync_after_resume_posts_spawn_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_after_resume_posts_normalized_startup_effort() -> None:
+async def test_subscribe_after_resume_posts_normalized_startup_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Startup mirrors Codex ``max`` as Omnigent ``xhigh`` immediately.
 
     A resumed app-server thread already carries its effective reasoning effort.
@@ -281,19 +284,37 @@ async def test_sync_after_resume_posts_normalized_startup_effort() -> None:
     ceiling is ``xhigh``, so Codex's equivalent ``max`` value is normalized at
     this boundary.
     """
-    client = _RecordingClient()
-    state = fwd._CodexForwarderState()
-    state.note_resume_response(
-        {"result": {"model": "gpt-5.6-sol", "reasoningEffort": "max"}}
-    )
+    class _ResumeClient:
+        async def request(self, method: str, params: dict) -> dict:
+            assert method == "thread/resume"
+            assert params == {"threadId": "thread_x", "excludeTurns": True}
+            return {
+                "result": {
+                    "model": "gpt-5.6-sol",
+                    "reasoningEffort": "max",
+                }
+            }
 
-    await fwd._sync_reasoning_effort_change(
-        client,
+    monkeypatch.setattr(fwd, "_refresh_model_from_config", lambda *_args: None)
+    monkeypatch.setattr(fwd, "_sync_model_change", AsyncMock())
+    monkeypatch.setattr(fwd, "_sync_codex_approval_mode_change", AsyncMock())
+    monkeypatch.setattr(fwd, "_replay_resume_response", AsyncMock())
+
+    ap_client = _RecordingClient()
+    state = fwd._CodexForwarderState()
+
+    await fwd._subscribe_until_ready(
+        _ResumeClient(),
+        ap_client,
         session_id="conv_x",
+        bridge_dir=tmp_path,
+        thread_id="thread_x",
+        usage_coalescer=MagicMock(),
+        elicitation_tracker=MagicMock(),
         forwarder_state=state,
     )
 
-    assert client.posts == [
+    assert ap_client.posts == [
         (
             "/v1/sessions/conv_x/events",
             {
