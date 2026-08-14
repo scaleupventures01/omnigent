@@ -885,6 +885,46 @@ def test_codex_config_args_form_base_cli_args_append(
     )
 
 
+def test_codex_cli_precedence_preserves_config_then_explicit_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI launch keeps config first and explicit pass-through args last.
+
+    Web-created sessions resolve and dedupe three argument layers separately.
+    The established CLI contract remains a direct concatenation, including an
+    exact duplicate supplied explicitly by the user.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "omnigent.cli._load_effective_config",
+        lambda: {
+            "harness": {
+                "codex-native": {
+                    "args": ["--shared-codex-flag", "--config-codex-flag"]
+                }
+            }
+        },
+    )
+    monkeypatch.setattr("omnigent.cli._ensure_backend", lambda *_: "http://localhost:0")
+    monkeypatch.setattr(
+        "omnigent.codex_native.run_codex_native",
+        _fake_run_codex_native_capture(captured),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["codex", "--shared-codex-flag", "--explicit-codex-flag"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["extra_args"] == (
+        "--shared-codex-flag",
+        "--config-codex-flag",
+        "--shared-codex-flag",
+        "--explicit-codex-flag",
+    )
+
+
 def test_codex_config_args_only_when_no_cli_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
