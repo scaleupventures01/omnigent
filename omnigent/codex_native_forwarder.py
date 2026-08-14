@@ -327,6 +327,9 @@ class _CodexForwarderState:
         until seeded.
     :param effort: Latest known Codex reasoning effort for this thread, e.g.
         ``"medium"``. ``None`` means Codex is using its model/default effort.
+    :param effort_observed: Whether a Codex settings payload explicitly carried
+        an effort field. This distinguishes an observed JSON ``null`` clear
+        from a response that omitted effort entirely.
     :param posted_effort: Last reasoning effort already mirrored to Omnigent
         via ``external_reasoning_effort_change``. ``None`` is a valid mirrored
         value, so ``posted_effort_known`` tracks whether the baseline has been
@@ -395,6 +398,7 @@ class _CodexForwarderState:
     # so the refresh can tell an unchanged file from a rewritten one.
     last_config_model: str | None = None
     effort: str | None = None
+    effort_observed: bool = False
     posted_effort: str | None = None
     posted_effort_known: bool = False
     collaboration_mode: str | None = None
@@ -824,6 +828,7 @@ class _CodexForwarderState:
             effort = payload[key]
             if effort is None or (isinstance(effort, str) and effort):
                 self.effort = EFFORT_ALIASES.get(effort, effort) if effort is not None else None
+                self.effort_observed = True
             return
 
     def _note_collaboration_mode_fields(self, payload: _JsonObject) -> None:
@@ -2898,6 +2903,12 @@ async def _sync_reasoning_effort_change(
     :returns: None.
     """
     effort = forwarder_state.effort
+    if (
+        not forwarder_state.effort_observed
+        and effort is None
+        and not forwarder_state.posted_effort_known
+    ):
+        return
     if forwarder_state.posted_effort_known and effort == forwarder_state.posted_effort:
         return
     response = await _post_session_event(
