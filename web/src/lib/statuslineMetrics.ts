@@ -43,6 +43,39 @@ export interface FreshRateLimits {
   sevenDayResets: number;
 }
 
+export type ProviderId = "claude" | "chatgpt" | "kimi";
+
+export interface ProviderUsageWindow {
+  usedPercent: number;
+  resetsAt: number;
+}
+
+export interface ProviderUsage {
+  fiveHour: ProviderUsageWindow | null;
+  weekly: ProviderUsageWindow | null;
+}
+
+export interface ProviderRateLimitsData {
+  capturedAtMs?: number;
+  providers?: Partial<Record<ProviderId, ProviderUsage>>;
+}
+
+export function providerUsageWindow(
+  data: ProviderRateLimitsData | null,
+  provider: ProviderId,
+  window: keyof ProviderUsage,
+): ProviderUsageWindow | null {
+  const value = data?.providers?.[provider]?.[window];
+  if (
+    !value ||
+    !finiteStatusNumber(value.usedPercent) ||
+    !finiteStatusNumber(value.resetsAt)
+  ) {
+    return null;
+  }
+  return value;
+}
+
 /** Validated rate limits, or null when fields are missing or captured is stale. */
 export function freshRateLimits(data: RateLimitsData | null, nowSeconds: number): FreshRateLimits | null {
   if (!data || !finiteStatusNumber(data.captured) || nowSeconds - data.captured > 3600) {
