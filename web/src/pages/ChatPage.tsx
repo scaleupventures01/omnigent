@@ -215,13 +215,14 @@ import {
   formatMoneyComma,
   formatMoneyK,
   formatSignedMoneyK,
-  freshRateLimits,
   metricPercent,
   progressBar,
+  providerUsageWindow,
   qualifiedPipelineValue,
   rateLimitLeftDays,
   rateLimitLeftHours,
-  type RateLimitsData,
+  type ProviderId,
+  type ProviderRateLimitsData,
   type StatuslineData,
 } from "@/lib/statuslineMetrics";
 
@@ -4242,6 +4243,7 @@ function ComposerStatusLine({
   onHostReconnect?: () => void;
 }) {
   const conversationId = useChatStore((s) => s.conversationId);
+  const { session: statusLineSession } = useSession(conversationId);
   const contextWindow = useChatStore((s) => s.contextWindow);
   const tokensUsed = useChatStore((s) => s.tokensUsed);
   const codexPlanMode = useChatStore((s) => s.codexPlanMode);
@@ -4250,7 +4252,7 @@ function ComposerStatusLine({
   // the other status-line values rather than a separate fetch.
   const gitBranch = useChatStore((s) => s.gitBranch);
   const [statusline, setStatusline] = useState<StatuslineData | null>(null);
-  const [rateLimits, setRateLimits] = useState<RateLimitsData | null>(null);
+  const [providerLimits, setProviderLimits] = useState<ProviderRateLimitsData | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -4273,13 +4275,13 @@ function ComposerStatusLine({
       try {
         const response = await fetch("/__metrics/ratelimits", { cache: "no-store" });
         if (!response.ok) {
-          if (mounted) setRateLimits(null);
+          if (mounted) setProviderLimits(null);
           return;
         }
-        const data = (await response.json()) as RateLimitsData;
-        if (mounted) setRateLimits(data);
+        const data = (await response.json()) as ProviderRateLimitsData;
+        if (mounted) setProviderLimits(data);
       } catch {
-        if (mounted) setRateLimits(null);
+        if (mounted) setProviderLimits(null);
       }
     }
 
@@ -4297,27 +4299,33 @@ function ComposerStatusLine({
 
   const showBranch = !!conversationId && !!gitBranch;
   // Host indicator (green/red dot + host name), left of the worktree branch.
-  // Hidden on sub-agent sessions — the header's child-session slot owns the
+  // Hidden on sub-agent sessions. The header's child-session slot owns the
   // back affordance there, mirroring where this badge used to live. HostBadge
   // self-hides when the session isn't host-bound.
-  const showHost = !!conversationId && !isSubAgentSession;
+  const showHost =
+    !!conversationId && !isSubAgentSession && statusLineSession?.hostId != null;
   const showPlanMode = !!conversationId && codexPlanMode;
   const showGoal = !!conversationId && goal != null;
   // contextWindow > 0: the SSE path validates it but the snapshot path doesn't, and 0/0 → "NaN%".
   const showRing =
     !!conversationId && contextWindow != null && contextWindow > 0 && tokensUsed != null;
+  const showMetrics = statusline != null || providerLimits != null;
 
-  const goalRunrate = statusline?.goal?.runrate;
+  const goalRunrate = statusline?.goal?.runrate ?? statusline?.goal?.current;
   const goalTarget = statusline?.goal?.target;
   const goalPercent = metricPercent(goalRunrate, goalTarget);
   const qualifiedPipeline = qualifiedPipelineValue(statusline);
   const pipelineTarget = statusline?.pipeline?.target ?? goalTarget;
   const pipelinePercent = metricPercent(qualifiedPipeline, pipelineTarget);
   const cashValue = statusline?.cash?.value;
+  const cashDisplay = statusline?.cash?.display ?? formatMoneyK(cashValue);
   const ntDaily = statusline?.nt?.daily;
   const ntPositions = statusline?.nt?.positions;
+  const statuslineUpdated =
+    statusline?.updated ??
+    (finiteStatusNumber(statusline?.capturedAtMs) ? statusline.capturedAtMs / 1000 : undefined);
   const stale =
-    !finiteStatusNumber(statusline?.updated) || now / 1000 - statusline.updated > 1800;
+    !finiteStatusNumber(statuslineUpdated) || now / 1000 - statuslineUpdated > 1800;
   const cashClass = stale
     ? "text-muted-foreground"
     : !finiteStatusNumber(cashValue)
@@ -4328,52 +4336,86 @@ function ComposerStatusLine({
           ? "text-yellow-400"
           : "text-green-400";
   const nautilusLabel =
-    finiteStatusNumber(ntPositions) && ntPositions === 0
+    statusline?.net?.direction === "flat"
+      ? "NT flat"
+      : finiteStatusNumber(ntPositions) && ntPositions === 0
       ? "NT flat"
       : finiteStatusNumber(ntPositions) && ntPositions !== 0 && finiteStatusNumber(ntDaily)
         ? `NT ${formatSignedMoneyK(ntDaily)} ${ntDaily >= 0 ? "▲" : "▼"}`
         : "NT -";
 
-  const rl = freshRateLimits(rateLimits, now / 1000);
   // Same severity thresholds as the terminal status line: red >=90, yellow >=70.
   const rlUsedClass = (pct: number) =>
     pct >= 90 ? "text-red-400" : pct >= 70 ? "text-yellow-400" : undefined;
 
+  const providerDefinitions: ReadonlyArray<{ id: ProviderId; label: string }> = [
+    { id: "claude", label: "Claude" },
+    { id: "chatgpt", label: "ChatGPT" },
+    { id: "kimi", label: "Kimi" },
+  ];
+
+  const providerSegments = providerDefinitions.map(({ id, label }) => {
+    const fiveHour = providerUsageWindow(providerLimits, id, "fiveHour");
+    const weekly = providerUsageWindow(providerLimits, id, "weekly");
+    const unavailable = fiveHour == null && weekly == null;
+
+    return (
+      <span
+        key={id}
+        data-testid={`provider-usage-${id}`}
+        className={cn("flex-none whitespace-nowrap", unavailable && "text-muted-foreground")}
+      >
+        <strong className="font-semibold">{label}</strong>{" "}
+        5h{" "}
+        {fiveHour == null ? (
+          "n/a"
+        ) : (
+          <>
+            <span className={rlUsedClass(fiveHour.usedPercent)}>
+              {Math.round(fiveHour.usedPercent)}%
+            </span>
+            {` (${rateLimitLeftHours(fiveHour.resetsAt - now / 1000)} left)`}
+          </>
+        )}
+        {"  wk "}
+        {weekly == null ? (
+          "n/a"
+        ) : (
+          <>
+            <span className={rlUsedClass(weekly.usedPercent)}>
+              {Math.round(weekly.usedPercent)}%
+            </span>
+            {` (${rateLimitLeftDays(weekly.resetsAt - now / 1000)} left)`}
+          </>
+        )}
+      </span>
+    );
+  });
+
   const metricSegments = [
     <span key="cash" className={cn("flex-none whitespace-nowrap", cashClass)}>
-      Cash {formatMoneyK(cashValue)}
+      Cash {cashDisplay}
     </span>,
     <span key="goal" className="flex-none whitespace-nowrap">
-      Goal <span className="text-green-400">{progressBar(goalPercent)}</span>{" "}
-      {displayMetricPercent(goalPercent)} {formatMoneyComma(goalRunrate)}/{formatMoneyK(goalTarget)}
+      Goal {displayMetricPercent(goalPercent)}{" "}
+      <span className="text-green-400">{progressBar(goalPercent)}</span>{" "}
+      {formatMoneyComma(goalRunrate)}/{formatMoneyK(goalTarget)}
     </span>,
     <span key="nautilus" className="flex-none whitespace-nowrap">
       {nautilusLabel}
     </span>,
     <span key="pipeline" className="flex-none whitespace-nowrap">
-      Pipeline <span className="text-yellow-400">{progressBar(pipelinePercent)}</span>{" "}
-      {displayMetricPercent(pipelinePercent)} {formatMoneyK(qualifiedPipeline)}/
+      Pipeline {displayMetricPercent(pipelinePercent)}{" "}
+      <span className="text-yellow-400">{progressBar(pipelinePercent)}</span>{" "}
+      {formatMoneyK(qualifiedPipeline)}/
       {formatMoneyK(pipelineTarget)}
     </span>,
-    <span
-      key="limits"
-      className={cn("flex-none whitespace-nowrap", rl == null && "text-muted-foreground")}
-      title={rl == null ? "not available in the web client" : undefined}
-    >
-      {rl == null ? (
-        "5h n/a  wk n/a"
-      ) : (
-        <>
-          {"5h "}
-          <span className={rlUsedClass(rl.fiveHourPct)}>{Math.round(rl.fiveHourPct)}%</span>
-          {` (${rateLimitLeftHours(rl.fiveHourResets - now / 1000)} left)  `}
-          {"wk "}
-          <span className={rlUsedClass(rl.sevenDayPct)}>{Math.round(rl.sevenDayPct)}%</span>
-          {` (${rateLimitLeftDays(rl.sevenDayResets - now / 1000)} left)`}
-        </>
-      )}
-    </span>,
+    ...providerSegments,
   ];
+
+  if (!showHost && !showBranch && !showPlanMode && !showGoal && !showRing && !showMetrics) {
+    return null;
+  }
 
   return (
     <div
@@ -4412,15 +4454,17 @@ function ComposerStatusLine({
         {showGoal && goal && <GoalStatusPill goal={goal} />}
         {showRing && <ContextRing contextWindow={contextWindow} tokensUsed={tokensUsed} />}
       </div>
-      <div
-        data-testid="omni-metrics"
-        className={cn(
-          "flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm font-normal",
-          stale ? "text-muted-foreground [&_*]:!text-muted-foreground" : "text-foreground",
-        )}
-      >
-        {metricSegments}
-      </div>
+      {showMetrics && (
+        <div
+          data-testid="omni-metrics"
+          className={cn(
+            "flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm font-normal",
+            stale ? "text-muted-foreground [&_*]:!text-muted-foreground" : "text-foreground",
+          )}
+        >
+          {metricSegments}
+        </div>
+      )}
     </div>
   );
 }
