@@ -67,6 +67,7 @@ _CODEX_FULL_BYPASS_ARG = "--dangerously-bypass-approvals-and-sandbox"
 _CODEX_POLICY_FLAGS = frozenset(
     {"--ask-for-approval", "-a", "--sandbox", "-s"}
 )
+_CODEX_POLICY_SHORT_FLAGS = ("-a", "-s")
 _CODEX_POLICY_CONFIG_KEYS = frozenset(
     {"approval_policy", "default_permissions", "sandbox_mode"}
 )
@@ -431,6 +432,9 @@ def _normalize_codex_full_bypass_args(args: list[str]) -> list[str]:
         if any(arg.startswith(f"{flag}=") for flag in _CODEX_POLICY_FLAGS):
             index += 1
             continue
+        if any(arg.startswith(flag) and arg != flag for flag in _CODEX_POLICY_SHORT_FLAGS):
+            index += 1
+            continue
 
         if arg in {"--config", "-c"} and index + 1 < len(args):
             assignment = args[index + 1]
@@ -442,6 +446,11 @@ def _normalize_codex_full_bypass_args(args: list[str]) -> list[str]:
             continue
         if arg.startswith(("--config=", "-c=")):
             assignment = arg.split("=", 1)[1]
+            if _codex_policy_config_key(assignment):
+                index += 1
+                continue
+        elif arg.startswith("-c") and arg != "-c":
+            assignment = arg[2:]
             if _codex_policy_config_key(assignment):
                 index += 1
                 continue
