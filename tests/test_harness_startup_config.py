@@ -8,6 +8,7 @@ from omnigent.harness_startup_config import (
     resolve_harness_args,
     resolve_harness_command,
     resolve_harness_config,
+    resolve_harness_launch_args,
     resolve_harness_path,
 )
 
@@ -317,3 +318,32 @@ def test_args_alias_canonicalized() -> None:
 
 def test_args_no_config_layer() -> None:
     assert resolve_harness_args("codex", ("--verbose",), cfg=None) == ["--verbose"]
+
+
+def test_layered_web_args_preserve_option_value_units() -> None:
+    bypass = "--dangerously-bypass-approvals-and-sandbox"
+    global_cfg = {
+        "harness": {
+            "codex": {"args": ["--config", "model_reasoning_effort=high", bypass]}
+        }
+    }
+    workspace_cfg = {
+        "harness": {
+            "codex": {"args": ["--config", "model_reasoning_effort=xhigh", bypass]}
+        }
+    }
+    session_args = ["--config", "model_reasoning_effort=medium", bypass]
+
+    assert resolve_harness_launch_args(
+        "codex",
+        session_args,
+        config_layers=(global_cfg, workspace_cfg),
+    ) == [
+        "--config",
+        "model_reasoning_effort=high",
+        bypass,
+        "--config",
+        "model_reasoning_effort=xhigh",
+        "--config",
+        "model_reasoning_effort=medium",
+    ]
