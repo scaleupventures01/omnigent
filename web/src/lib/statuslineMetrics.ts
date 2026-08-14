@@ -1,7 +1,9 @@
 export interface StatuslineData {
   updated?: number;
+  capturedAtMs?: number;
   goal?: {
     runrate?: number;
+    current?: number;
     target?: number;
   };
   pipeline?: {
@@ -9,14 +11,19 @@ export interface StatuslineData {
       stage?: string;
       value?: number;
     }>;
+    current?: number;
     target?: number;
   };
   cash?: {
     value?: number;
+    display?: string;
   };
   nt?: {
     daily?: number;
     positions?: number;
+  };
+  net?: {
+    direction?: string;
   };
 }
 
@@ -154,7 +161,7 @@ export function formatSignedMoneyK(value: unknown): string {
 
 export function qualifiedPipelineValue(data: StatuslineData | null): number | undefined {
   const stages = data?.pipeline?.stages;
-  if (!stages) return undefined;
+  if (!stages) return data?.pipeline?.current;
   return stages.reduce((sum, item) => {
     if (item.stage !== "REPLIED_INTERESTED" && item.stage !== "PROPOSAL_SENT") return sum;
     return finiteStatusNumber(item.value) ? sum + item.value : sum;
