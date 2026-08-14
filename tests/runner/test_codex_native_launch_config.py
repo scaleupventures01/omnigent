@@ -17,6 +17,13 @@ import pytest
 from omnigent.runner.app import _codex_native_launch_config
 
 
+@pytest.fixture(autouse=True)
+def _isolate_omnigent_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep snapshot-only assertions independent of user and workspace config."""
+    monkeypatch.setattr("omnigent.config.load_global_config", lambda path=None: {})
+    monkeypatch.setattr("omnigent.config.load_local_config", lambda path=None: {})
+
+
 class _Resp:
     """Minimal stand-in for an httpx response carrying a fixed status + payload."""
 
