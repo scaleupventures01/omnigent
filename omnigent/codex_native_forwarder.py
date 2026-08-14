@@ -56,6 +56,7 @@ from omnigent.codex_native_elicitation import (
 )
 from omnigent.entities.session_resources import terminal_resource_id
 from omnigent.json_types import JsonObject as _JsonObject
+from omnigent.reasoning_effort import EFFORT_ALIASES
 
 _logger = logging.getLogger(__name__)
 
@@ -447,6 +448,7 @@ class _CodexForwarderState:
         if not isinstance(result, dict):
             return
         self._note_model_fields(result)
+        self._note_effort_fields(result)
         self._note_approval_mode_fields(result)
         # Do NOT seed ``posted_model`` here. Omnigent must learn the session's
         # ACTUAL model — including the spawn default — because the cost-budget
@@ -821,7 +823,7 @@ class _CodexForwarderState:
                 continue
             effort = payload[key]
             if effort is None or (isinstance(effort, str) and effort):
-                self.effort = effort
+                self.effort = EFFORT_ALIASES.get(effort, effort) if effort is not None else None
             return
 
     def _note_collaboration_mode_fields(self, payload: _JsonObject) -> None:
@@ -2203,6 +2205,9 @@ async def _subscribe_until_ready(
             # response's model when config.toml has none.
             _refresh_model_from_config(bridge_dir, forwarder_state)
             await _sync_model_change(
+                ap_client, session_id=session_id, forwarder_state=forwarder_state
+            )
+            await _sync_reasoning_effort_change(
                 ap_client, session_id=session_id, forwarder_state=forwarder_state
             )
             await _sync_codex_approval_mode_change(
