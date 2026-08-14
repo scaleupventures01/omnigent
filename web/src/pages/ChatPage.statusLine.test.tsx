@@ -4,7 +4,7 @@ import type * as UseHostsModule from "@/hooks/useHosts";
 import type * as RunnerHealthProviderModule from "@/hooks/RunnerHealthProvider";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useChatStore } from "@/store/chatStore";
@@ -358,6 +358,116 @@ describe("Composer status line (branch + context ring)", () => {
 
     expect(screen.queryByTestId("host-badge")).toBeNull();
     expect(screen.getByTestId("composer-git-branch")).toBeInTheDocument();
+  });
+});
+
+describe("Composer provider usage status", () => {
+  const businessMetrics = {
+    capturedAtMs: Date.now(),
+    cash: { display: "$8K" },
+    goal: { percent: 75, current: 7_500, target: 10_000 },
+    net: { direction: "flat" },
+    pipeline: { percent: 11, current: 29_000, target: 275_000 },
+  };
+
+  const completeProviderLimits = () => ({
+    capturedAtMs: Date.now(),
+    providers: {
+      claude: {
+        fiveHour: { usedPercent: 12, resetsAt: 1_800_000_000 },
+        weekly: { usedPercent: 34, resetsAt: 1_800_086_400 },
+      },
+      chatgpt: {
+        fiveHour: { usedPercent: 56, resetsAt: 1_800_000_000 },
+        weekly: { usedPercent: 78, resetsAt: 1_800_086_400 },
+      },
+      kimi: {
+        fiveHour: { usedPercent: 90, resetsAt: 1_800_000_000 },
+        weekly: { usedPercent: 23, resetsAt: 1_800_086_400 },
+      },
+    },
+  });
+
+  let providerLimits: ReturnType<typeof completeProviderLimits>;
+
+  beforeEach(() => {
+    providerLimits = completeProviderLimits();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const body = url.endsWith("/__metrics/ratelimits") ? providerLimits : businessMetrics;
+        return {
+          ok: true,
+          json: async () => body,
+        } as Response;
+      }),
+    );
+    useChatStore.setState({
+      conversationId: "conv_test",
+      skills: [],
+      contextWindow: null,
+      tokensUsed: null,
+      sessionCostUsd: null,
+      gitBranch: null,
+      llmModel: null,
+      selectedModel: null,
+      selectedEffort: null,
+      codexModelOptions: [],
+      codexPlanMode: false,
+      nativeVendorOwnsModel: false,
+      sessionHarness: null,
+      subAgentName: null,
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows headed Claude, ChatGPT, and Kimi usage sections in order with their own windows", async () => {
+    renderComposer();
+
+    const metrics = await screen.findByTestId("omni-metrics");
+    const claude = within(metrics).getByTestId("provider-usage-claude");
+    const chatgpt = within(metrics).getByTestId("provider-usage-chatgpt");
+    const kimi = within(metrics).getByTestId("provider-usage-kimi");
+
+    expect(within(claude).getByText("Claude")).toBeVisible();
+    expect(within(chatgpt).getByText("ChatGPT")).toBeVisible();
+    expect(within(kimi).getByText("Kimi")).toBeVisible();
+    expect(claude.compareDocumentPosition(chatgpt) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(chatgpt.compareDocumentPosition(kimi) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+
+    expect(claude).toHaveTextContent(/5h\s+12%/);
+    expect(claude).toHaveTextContent(/wk\s+34%/);
+    expect(chatgpt).toHaveTextContent(/5h\s+56%/);
+    expect(chatgpt).toHaveTextContent(/wk\s+78%/);
+    expect(kimi).toHaveTextContent(/5h\s+90%/);
+    expect(kimi).toHaveTextContent(/wk\s+23%/);
+
+    expect(metrics).toHaveTextContent(/Cash\s+\$8K/);
+    expect(metrics).toHaveTextContent(/Goal\s+75%/);
+    expect(metrics).toHaveTextContent(/Pipeline\s+11%/);
+  });
+
+  it("shows n/a for a missing Kimi weekly window without hiding Claude or ChatGPT", async () => {
+    providerLimits.providers.kimi.weekly = null as never;
+    renderComposer();
+
+    const metrics = await screen.findByTestId("omni-metrics");
+    const claude = within(metrics).getByTestId("provider-usage-claude");
+    const chatgpt = within(metrics).getByTestId("provider-usage-chatgpt");
+    const kimi = within(metrics).getByTestId("provider-usage-kimi");
+
+    expect(claude).toHaveTextContent(/5h\s+12%.*wk\s+34%/);
+    expect(chatgpt).toHaveTextContent(/5h\s+56%.*wk\s+78%/);
+    expect(kimi).toHaveTextContent(/5h\s+90%.*wk\s+n\/a/);
   });
 });
 
