@@ -10342,3 +10342,83 @@ def test_codex_discover_thread_and_forward_writes_routing_summary_on_timeout(
     assert err is not None
     assert "Launch routing: Codex CLI login (no provider configured) -- SENTINEL" in err
     assert "startup timed out" in err
+
+
+@pytest.mark.asyncio
+async def test_web_launch_resolves_configured_codex_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Web-created Codex terminals honor layered startup args at launch.
+
+    The runner receives explicit per-session args from the session snapshot, but
+    it must also resolve the Codex args configured globally and for the session
+    workspace. Layer order is global, workspace, then explicit session args.
+    Exact duplicates are emitted once, including the full approval and sandbox
+    bypass flag that must reach ``build_codex_remote_args``.
+    """
+    from omnigent.runner.native import orchestration as native_orch
+
+    bypass = "--dangerously-bypass-approvals-and-sandbox"
+    config_home = tmp_path / "config-home"
+    workspace = tmp_path / "workspace"
+    local_config_dir = workspace / ".omnigent"
+    config_home.mkdir()
+    local_config_dir.mkdir(parents=True)
+    (config_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "harnesses": {
+                    "codex": {"args": [bypass, "--global-codex-flag"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (local_config_dir / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "harnesses": {
+                    "codex": {"args": [bypass, "--workspace-codex-flag"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("RUNNER_SERVER_URL", "https://runner.example.test")
+
+    snapshot = {
+        "workspace": str(workspace),
+        "terminal_launch_args": ["--session-codex-flag"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/sessions/conv_web"
+        return httpx.Response(200, json=snapshot)
+
+    async with httpx.AsyncClient(
+        base_url="https://omnigent.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        launch_config = await native_orch._codex_native_launch_config(
+            session_id="conv_web",
+            server_client=client,
+        )
+
+    assert launch_config.terminal_launch_args == [
+        bypass,
+        "--global-codex-flag",
+        "--workspace-codex-flag",
+        "--session-codex-flag",
+    ]
+
+    remote_args = codex_native_app_server.build_codex_remote_args(
+        codex_args=tuple(launch_config.terminal_launch_args),
+        thread_id=None,
+        remote_url="ws://127.0.0.1:9999",
+        bypass_sandbox=False,
+        config_overrides=(),
+        bypass_hook_trust=False,
+    )
+    assert remote_args.count(bypass) == 1
