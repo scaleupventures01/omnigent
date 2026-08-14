@@ -10390,7 +10390,7 @@ async def test_web_launch_resolves_configured_codex_args(
 
     snapshot = {
         "workspace": str(workspace),
-        "terminal_launch_args": ["--session-codex-flag"],
+        "terminal_launch_args": [bypass, "--session-codex-flag"],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
