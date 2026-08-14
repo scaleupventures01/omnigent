@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants, createReadStream } from "node:fs";
-import { access, chmod, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, rmdir, stat, utimes, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import { homedir } from "node:os";
@@ -17,6 +17,10 @@ const METRICS_PATH = "/statusline";
 const METRICS_TIMEOUT_MS = 3000;
 const PROVIDER_TIMEOUT_MS = 8000;
 const PROVIDER_CACHE_TTL_MS = 60_000;
+const KIMI_LOCK_STALE_MS = 5_000;
+const KIMI_LOCK_UPDATE_MS = KIMI_LOCK_STALE_MS / 2;
+const KIMI_LOCK_RETRY_MS = 500;
+const KIMI_LOCK_RETRY_COUNT = 120;
 const USER_HOME = homedir();
 const RATELIMITS_FILE = path.join(USER_HOME, ".claude", "statusline-ratelimits.json");
 const KIMI_CREDENTIALS_FILE = path.join(
@@ -329,6 +333,18 @@ function kimiCredentialsExpireAt(credentials) {
   return epochSeconds(credentials?.expires_at ?? credentials?.expiresAt);
 }
 
+function kimiCredentialsExpireIn(credentials) {
+  return finiteNumber(credentials?.expires_in ?? credentials?.expiresIn);
+}
+
+function shouldRefreshKimiCredentials(credentials, nowSeconds = Date.now() / 1000) {
+  const expiresAt = kimiCredentialsExpireAt(credentials);
+  if (expiresAt == null) return false;
+  const expiresIn = kimiCredentialsExpireIn(credentials);
+  const threshold = Math.max(300, expiresIn != null && expiresIn > 0 ? expiresIn * 0.5 : 0);
+  return expiresAt - nowSeconds < threshold;
+}
+
 async function fetchJson(url, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
@@ -341,14 +357,74 @@ async function fetchJson(url, options) {
   }
 }
 
+async function reclaimStaleKimiCredentialLock(lockDirectory) {
+  let first;
+  try {
+    first = await stat(lockDirectory);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (Date.now() - first.mtimeMs <= KIMI_LOCK_STALE_MS) return false;
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  let second;
+  try {
+    second = await stat(lockDirectory);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  const unchanged =
+    first.dev === second.dev && first.ino === second.ino && first.mtimeMs === second.mtimeMs;
+  if (!unchanged || Date.now() - second.mtimeMs <= KIMI_LOCK_STALE_MS) return false;
+
+  const staleDirectory = `${lockDirectory}.stale-${process.pid}-${Date.now()}`;
+  try {
+    await rename(lockDirectory, staleDirectory);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  await rmdir(staleDirectory).catch(() => {});
+  return true;
+}
+
 async function acquireKimiCredentialLock() {
-  const lockFile = `${KIMI_OAUTH_LOCK_TARGET}.lock`;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  const lockDirectory = `${KIMI_OAUTH_LOCK_TARGET}.lock`;
+  await mkdir(path.dirname(KIMI_OAUTH_LOCK_TARGET), { recursive: true });
+  await writeFile(KIMI_OAUTH_LOCK_TARGET, "", { flag: "a", mode: 0o600 });
+
+  for (let attempt = 0; attempt < KIMI_LOCK_RETRY_COUNT; attempt += 1) {
     try {
-      return { handle: await open(lockFile, "wx", 0o600), lockFile };
+      await mkdir(lockDirectory, { mode: 0o700 });
+      const acquired = await stat(lockDirectory);
+      const heartbeat = setInterval(() => {
+        void stat(lockDirectory)
+          .then((current) => {
+            if (current.dev !== acquired.dev || current.ino !== acquired.ino) return;
+            const now = new Date();
+            return utimes(lockDirectory, now, now);
+          })
+          .catch(() => {});
+      }, KIMI_LOCK_UPDATE_MS);
+      heartbeat.unref();
+
+      return async () => {
+        clearInterval(heartbeat);
+        try {
+          const current = await stat(lockDirectory);
+          if (current.dev === acquired.dev && current.ino === acquired.ino) {
+            await rmdir(lockDirectory);
+          }
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      };
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (await reclaimStaleKimiCredentialLock(lockDirectory)) continue;
+      await new Promise((resolve) => setTimeout(resolve, KIMI_LOCK_RETRY_MS));
     }
   }
   throw new Error("Timed out waiting for the Kimi OAuth credential lock");
@@ -388,20 +464,15 @@ async function refreshKimiCredentials(credentials) {
 
 async function currentKimiCredentials() {
   let credentials = JSON.parse(await readFile(KIMI_CREDENTIALS_FILE, "utf8"));
-  const expiresAt = kimiCredentialsExpireAt(credentials);
-  if (expiresAt == null || expiresAt - Date.now() / 1000 > 300) return credentials;
+  if (!shouldRefreshKimiCredentials(credentials)) return credentials;
 
-  const lock = await acquireKimiCredentialLock();
+  const releaseLock = await acquireKimiCredentialLock();
   try {
     credentials = JSON.parse(await readFile(KIMI_CREDENTIALS_FILE, "utf8"));
-    const refreshedExpiresAt = kimiCredentialsExpireAt(credentials);
-    if (refreshedExpiresAt == null || refreshedExpiresAt - Date.now() / 1000 > 300) {
-      return credentials;
-    }
+    if (!shouldRefreshKimiCredentials(credentials)) return credentials;
     return await refreshKimiCredentials(credentials);
   } finally {
-    await lock.handle.close();
-    await unlink(lock.lockFile).catch(() => {});
+    await releaseLock();
   }
 }
 
@@ -452,13 +523,12 @@ export async function collectProviderRateLimits() {
   if (providerCache.inFlight != null) return await providerCache.inFlight;
 
   providerCache.inFlight = (async () => {
-    const previous = providerCache.value;
     const providers = {
-      claude: previous?.providers?.claude ?? emptyProviderUsage(),
-      chatgpt: previous?.providers?.chatgpt ?? emptyProviderUsage(),
-      kimi: previous?.providers?.kimi ?? emptyProviderUsage(),
+      claude: emptyProviderUsage(),
+      chatgpt: emptyProviderUsage(),
+      kimi: emptyProviderUsage(),
     };
-    let claudeLegacy = previous?.claudeLegacy ?? null;
+    let claudeLegacy = null;
     const collectors = [readClaudeUsage(), readCodexUsage(), readKimiUsage()];
     const results = await Promise.allSettled(collectors);
 
