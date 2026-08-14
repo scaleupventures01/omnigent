@@ -48,6 +48,12 @@ from tests.runner.conftest import (
 from tests.runner.helpers import NullServerClient
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep exact launch-argv assertions independent of user configuration."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
+
+
 @pytest.mark.asyncio
 async def test_create_session_threads_cursor_bridge_dir_without_dead_guard_env(
     tmp_path: Path,
