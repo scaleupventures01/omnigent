@@ -1003,7 +1003,7 @@ async def _codex_native_launch_config(
     from omnigent.config import load_global_config, load_local_config
     from omnigent.harness_startup_config import resolve_harness_launch_args
 
-    terminal_launch_args = resolve_harness_launch_args(
+    resolved_terminal_launch_args = resolve_harness_launch_args(
         "codex-native",
         terminal_launch_args or (),
         config_layers=(
@@ -1011,6 +1011,10 @@ async def _codex_native_launch_config(
             load_local_config(workspace / ".omnigent" / "config.yaml"),
         ),
     )
+    if terminal_launch_args is None and not resolved_terminal_launch_args:
+        terminal_launch_args = None
+    else:
+        terminal_launch_args = resolved_terminal_launch_args
     # Fork directives stamped on a clone at fork time. Only consulted when
     # the clone has no external_session_id of its own yet (see the
     # fork-source branch in _auto_create_codex_terminal); inert otherwise.
