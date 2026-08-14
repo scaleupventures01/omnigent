@@ -360,15 +360,16 @@ def resolve_harness_launch_args(
     """Resolve ordered config layers plus explicit native-harness args.
 
     Each config layer contributes ``harness.<canonical>.args`` in the order
-    supplied, followed by *explicit_args*. Exact duplicates are removed on
-    first occurrence by default. Direct CLI callers use
-    :func:`resolve_harness_args`, which disables deduplication to preserve
-    pass-through semantics.
+    supplied, followed by *explicit_args*. Repeated Codex approval-bypass
+    switches are collapsed to their first occurrence by default. All other
+    tokens remain untouched so option/value pairs keep their adjacency. Direct
+    CLI callers use :func:`resolve_harness_args`, which disables deduplication
+    to preserve pass-through semantics.
 
     :param harness: A harness id (canonical or alias).
     :param explicit_args: Most-specific per-launch args, emitted last.
     :param config_layers: Config mappings ordered from least to most specific.
-    :param deduplicate: Remove exact duplicate arguments while preserving order.
+    :param deduplicate: Collapse repeated Codex approval-bypass switches.
     :returns: The resolved native-harness launch args.
     """
     canonical = _canonicalize(harness)
@@ -384,7 +385,16 @@ def resolve_harness_launch_args(
     resolved.extend(explicit_args)
     if not deduplicate:
         return resolved
-    return list(dict.fromkeys(resolved))
+    bypass_arg = "--dangerously-bypass-approvals-and-sandbox"
+    deduplicated: list[str] = []
+    bypass_seen = False
+    for arg in resolved:
+        if arg == bypass_arg:
+            if bypass_seen:
+                continue
+            bypass_seen = True
+        deduplicated.append(arg)
+    return deduplicated
 
 
 def config_harness_path_override(
