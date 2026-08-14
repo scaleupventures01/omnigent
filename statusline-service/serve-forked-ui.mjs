@@ -1,18 +1,34 @@
-import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { access, chmod, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
+import { homedir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const LISTEN_HOST = "127.0.0.1";
-const LISTEN_PORT = 6768;
+const LISTEN_PORT = Number(process.env.OMNIGENT_FORKED_UI_PORT ?? 6768);
 const BACKEND_HOST = "127.0.0.1";
 const BACKEND_PORT = 6767;
 const METRICS_HOST = "127.0.0.1";
 const METRICS_PORT = 6789;
 const METRICS_PATH = "/statusline";
 const METRICS_TIMEOUT_MS = 3000;
-const RATELIMITS_FILE = "/Users/calvinwilliamsjr/.claude/statusline-ratelimits.json";
+const PROVIDER_TIMEOUT_MS = 8000;
+const PROVIDER_CACHE_TTL_MS = 60_000;
+const USER_HOME = homedir();
+const RATELIMITS_FILE = path.join(USER_HOME, ".claude", "statusline-ratelimits.json");
+const KIMI_CREDENTIALS_FILE = path.join(
+  USER_HOME,
+  ".kimi-code",
+  "credentials",
+  "kimi-code.json",
+);
+const KIMI_OAUTH_LOCK_TARGET = path.join(USER_HOME, ".kimi-code", "oauth", "kimi-code");
+const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
+const KIMI_TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
+const KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const STATIC_ROOT = "/Users/calvinwilliamsjr/Domains/infra/omnigent/omnigent/server/static/web-ui";
 const INDEX_FILE = path.join(STATIC_ROOT, "index.html");
 const PROXY_PREFIXES = ["/v1", "/api", "/auth", "/health"];
@@ -145,34 +161,345 @@ function serveStatuslineMetrics(request, response) {
   });
 }
 
-// The Claude Code status line writes account-wide rate limits to RATELIMITS_FILE;
-// read it fresh per request so the web bar always sees the latest capture.
-async function serveRateLimits(request, response) {
-  let raw;
-  try {
-    raw = await readFile(RATELIMITS_FILE, "utf8");
-    JSON.parse(raw);
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      logError("rate-limit metrics unavailable", error);
-    }
-    const body = '{"error":"Rate-limit metrics unavailable"}\n';
-    response.writeHead(404, {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(body),
-      "Cache-Control": "no-store",
-      Connection: "close",
-    });
-    response.end(body);
-    return;
+function finiteNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
   }
+  return null;
+}
 
+function clampPercent(value) {
+  const numeric = finiteNumber(value);
+  return numeric == null ? null : Math.min(100, Math.max(0, numeric));
+}
+
+function epochSeconds(value) {
+  const numeric = finiteNumber(value);
+  if (numeric != null) {
+    return numeric > 10_000_000_000 ? numeric / 1000 : numeric;
+  }
+  if (typeof value !== "string" || value.length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed / 1000 : null;
+}
+
+function usageWindow(usedPercent, resetsAt) {
+  const normalizedPercent = clampPercent(usedPercent);
+  const normalizedReset = epochSeconds(resetsAt);
+  if (normalizedPercent == null || normalizedReset == null) return null;
+  return { usedPercent: normalizedPercent, resetsAt: normalizedReset };
+}
+
+function emptyProviderUsage() {
+  return { fiveHour: null, weekly: null };
+}
+
+async function readClaudeUsage() {
+  const raw = JSON.parse(await readFile(RATELIMITS_FILE, "utf8"));
+  return {
+    raw,
+    usage: {
+      fiveHour: usageWindow(
+        raw?.five_hour?.used_percentage ?? raw?.five_hour?.pct,
+        raw?.five_hour?.resets_at ?? raw?.five_hour?.resets,
+      ),
+      weekly: usageWindow(
+        raw?.seven_day?.used_percentage ?? raw?.seven_day?.pct,
+        raw?.seven_day?.resets_at ?? raw?.seven_day?.resets,
+      ),
+    },
+  };
+}
+
+async function findCodexBinary() {
+  const candidates = [
+    process.env.CODEX_BIN,
+    ...String(process.env.PATH ?? "")
+      .split(path.delimiter)
+      .filter(Boolean)
+      .map((directory) => path.join(directory, "codex")),
+    path.join(USER_HOME, ".npm-global", "bin", "codex"),
+  ].filter(Boolean);
+
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next installed location.
+    }
+  }
+  throw new Error("Codex executable not found on PATH");
+}
+
+async function readCodexUsage() {
+  const codexBinary = await findCodexBinary();
+
+  return await new Promise((resolve, reject) => {
+    const child = spawn(codexBinary, ["app-server", "--listen", "stdio://"], {
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let settled = false;
+    let buffer = "";
+    const timer = setTimeout(() => {
+      finish(new Error("Codex rate-limit request timed out"));
+    }, PROVIDER_TIMEOUT_MS);
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      if (error) reject(error);
+      else resolve(value);
+    }
+
+    function send(payload) {
+      child.stdin.write(`${JSON.stringify(payload)}\n`);
+    }
+
+    child.once("error", (error) => finish(error));
+    child.once("close", (code) => {
+      if (!settled) finish(new Error(`Codex app-server exited before replying (${code ?? "unknown"})`));
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        if (!line) continue;
+
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+
+        if (message.id === 1 && message.result != null) {
+          send({ method: "initialized", params: {} });
+          send({ id: 2, method: "account/rateLimits/read", params: {} });
+        } else if (message.id === 2) {
+          if (message.error) {
+            finish(new Error("Codex rate-limit request failed"));
+            return;
+          }
+          const limits = message.result?.rateLimits ?? message.result ?? {};
+          const windows = [limits.primary, limits.secondary].filter(Boolean);
+          const fiveHour =
+            windows.find((window) => finiteNumber(window?.windowDurationMins) === 300) ??
+            (limits.primary?.windowDurationMins == null ? limits.primary : null);
+          const weekly =
+            windows.find((window) => finiteNumber(window?.windowDurationMins) === 10_080) ??
+            (limits.secondary?.windowDurationMins == null ? limits.secondary : null);
+          finish(null, {
+            fiveHour: usageWindow(fiveHour?.usedPercent, fiveHour?.resetsAt),
+            weekly: usageWindow(weekly?.usedPercent, weekly?.resetsAt),
+          });
+          return;
+        }
+      }
+    });
+
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: {
+          name: "omnigent-statusline",
+          title: "Omnigent statusline",
+          version: "1.0.0",
+        },
+      },
+    });
+  });
+}
+
+function credentialValue(credentials, snakeName, camelName) {
+  const value = credentials?.[snakeName] ?? credentials?.[camelName];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function kimiCredentialsExpireAt(credentials) {
+  return epochSeconds(credentials?.expires_at ?? credentials?.expiresAt);
+}
+
+async function fetchJson(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function acquireKimiCredentialLock() {
+  const lockFile = `${KIMI_OAUTH_LOCK_TARGET}.lock`;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      return { handle: await open(lockFile, "wx", 0o600), lockFile };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw new Error("Timed out waiting for the Kimi OAuth credential lock");
+}
+
+async function refreshKimiCredentials(credentials) {
+  const refreshToken = credentialValue(credentials, "refresh_token", "refreshToken");
+  if (!refreshToken) throw new Error("Kimi refresh token is unavailable");
+
+  const refreshed = await fetchJson(KIMI_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: KIMI_CLIENT_ID,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+  const accessToken = credentialValue(refreshed, "access_token", "accessToken");
+  if (!accessToken) throw new Error("Kimi token refresh returned no access token");
+
+  const next = {
+    ...credentials,
+    access_token: accessToken,
+    refresh_token: credentialValue(refreshed, "refresh_token", "refreshToken") ?? refreshToken,
+  };
+  const expiresIn = finiteNumber(refreshed?.expires_in ?? refreshed?.expiresIn);
+  if (expiresIn != null) next.expires_at = Math.floor(Date.now() / 1000 + expiresIn);
+
+  const temporaryFile = `${KIMI_CREDENTIALS_FILE}.${process.pid}.tmp`;
+  await writeFile(temporaryFile, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await chmod(temporaryFile, 0o600);
+  await rename(temporaryFile, KIMI_CREDENTIALS_FILE);
+  await chmod(KIMI_CREDENTIALS_FILE, 0o600);
+  return next;
+}
+
+async function currentKimiCredentials() {
+  let credentials = JSON.parse(await readFile(KIMI_CREDENTIALS_FILE, "utf8"));
+  const expiresAt = kimiCredentialsExpireAt(credentials);
+  if (expiresAt == null || expiresAt - Date.now() / 1000 > 300) return credentials;
+
+  const lock = await acquireKimiCredentialLock();
+  try {
+    credentials = JSON.parse(await readFile(KIMI_CREDENTIALS_FILE, "utf8"));
+    const refreshedExpiresAt = kimiCredentialsExpireAt(credentials);
+    if (refreshedExpiresAt == null || refreshedExpiresAt - Date.now() / 1000 > 300) {
+      return credentials;
+    }
+    return await refreshKimiCredentials(credentials);
+  } finally {
+    await lock.handle.close();
+    await unlink(lock.lockFile).catch(() => {});
+  }
+}
+
+async function readKimiUsage() {
+  const credentials = await currentKimiCredentials();
+  const accessToken = credentialValue(credentials, "access_token", "accessToken");
+  if (!accessToken) throw new Error("Kimi access token is unavailable");
+
+  const payload = await fetchJson(KIMI_USAGE_URL, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const limits = Array.isArray(payload?.limits) ? payload.limits : [];
+  const fiveHour = limits.find(
+    (row) =>
+      (Number(row?.window?.duration) === 5 && row?.window?.unit === "hour") ||
+      (Number(row?.window?.duration) === 300 &&
+        row?.window?.timeUnit === "TIME_UNIT_MINUTE"),
+  );
+  const weekly = limits.find((row) => row?.window?.unit === "week");
+  const normalizeRow = (row) => {
+    const detail = row?.detail ?? row;
+    const limit = finiteNumber(detail?.limit);
+    const remaining = finiteNumber(detail?.remaining);
+    const used = finiteNumber(detail?.used) ??
+      (limit != null && remaining != null ? limit - remaining : null);
+    if (used == null || limit == null || limit <= 0) return null;
+    return usageWindow(
+      Math.round(Math.min(1, Math.max(0, used / limit)) * 100),
+      row?.reset_at ?? detail?.resetTime,
+    );
+  };
+  return {
+    fiveHour: normalizeRow(fiveHour),
+    weekly: normalizeRow(weekly) ?? normalizeRow(payload?.usage),
+  };
+}
+
+const providerCache = {
+  value: null,
+  expiresAt: 0,
+  inFlight: null,
+};
+
+export async function collectProviderRateLimits() {
+  if (providerCache.value != null && Date.now() < providerCache.expiresAt) {
+    return providerCache.value;
+  }
+  if (providerCache.inFlight != null) return await providerCache.inFlight;
+
+  providerCache.inFlight = (async () => {
+    const previous = providerCache.value;
+    const providers = {
+      claude: previous?.providers?.claude ?? emptyProviderUsage(),
+      chatgpt: previous?.providers?.chatgpt ?? emptyProviderUsage(),
+      kimi: previous?.providers?.kimi ?? emptyProviderUsage(),
+    };
+    let claudeLegacy = previous?.claudeLegacy ?? null;
+    const collectors = [readClaudeUsage(), readCodexUsage(), readKimiUsage()];
+    const results = await Promise.allSettled(collectors);
+
+    if (results[0].status === "fulfilled") {
+      providers.claude = results[0].value.usage;
+      claudeLegacy = results[0].value.raw;
+    } else {
+      logError("Claude rate-limit collector failed", results[0].reason);
+    }
+    if (results[1].status === "fulfilled") providers.chatgpt = results[1].value;
+    else logError("ChatGPT rate-limit collector failed", results[1].reason);
+    if (results[2].status === "fulfilled") providers.kimi = results[2].value;
+    else logError("Kimi rate-limit collector failed", results[2].reason);
+
+    const value = {
+      ...(claudeLegacy ?? {}),
+      capturedAtMs: Date.now(),
+      providers,
+      claudeLegacy,
+    };
+    providerCache.value = value;
+    providerCache.expiresAt = Date.now() + PROVIDER_CACHE_TTL_MS;
+    return value;
+  })();
+
+  try {
+    return await providerCache.inFlight;
+  } finally {
+    providerCache.inFlight = null;
+  }
+}
+
+async function serveRateLimits(_request, response) {
+  const payload = await collectProviderRateLimits();
+  const body = `${JSON.stringify(payload)}\n`;
   response.writeHead(200, {
     "Content-Type": "application/json",
-    "Content-Length": Buffer.byteLength(raw),
+    "Content-Length": Buffer.byteLength(body),
     "Cache-Control": "no-store",
   });
-  response.end(raw);
+  response.end(body);
 }
 
 function proxyHttpRequest(request, response, targetPath) {
@@ -441,6 +768,11 @@ server.on("error", (error) => {
   process.exitCode = 1;
 });
 
-server.listen(LISTEN_PORT, LISTEN_HOST, () => {
-  console.log(`Forked Omnigent UI listening at http://${LISTEN_HOST}:${LISTEN_PORT}`);
-});
+if (
+  process.argv[1] != null &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
+  server.listen(LISTEN_PORT, LISTEN_HOST, () => {
+    console.log(`Forked Omnigent UI listening at http://${LISTEN_HOST}:${LISTEN_PORT}`);
+  });
+}
