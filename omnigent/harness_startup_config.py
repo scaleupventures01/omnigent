@@ -63,6 +63,14 @@ _LEGACY_PATH_WARNED: set[str] = set()
 _OVERRIDE_KEY_COMMAND = "command"
 _OVERRIDE_KEY_ARGS = "args"
 
+_CODEX_FULL_BYPASS_ARG = "--dangerously-bypass-approvals-and-sandbox"
+_CODEX_POLICY_FLAGS = frozenset(
+    {"--ask-for-approval", "-a", "--sandbox", "-s"}
+)
+_CODEX_POLICY_CONFIG_KEYS = frozenset(
+    {"approval_policy", "default_permissions", "sandbox_mode"}
+)
+
 
 class _HarnessOverride(TypedDict, total=False):
     command: str
@@ -360,16 +368,17 @@ def resolve_harness_launch_args(
     """Resolve ordered config layers plus explicit native-harness args.
 
     Each config layer contributes ``harness.<canonical>.args`` in the order
-    supplied, followed by *explicit_args*. Repeated Codex approval-bypass
-    switches are collapsed to their first occurrence by default. All other
+    supplied, followed by *explicit_args*. When Codex full bypass is present,
+    repeated bypass switches are collapsed to their first occurrence and
+    conflicting approval/sandbox overrides are removed by default. All other
     tokens remain untouched so option/value pairs keep their adjacency. Direct
-    CLI callers use :func:`resolve_harness_args`, which disables deduplication
+    CLI callers use :func:`resolve_harness_args`, which disables normalization
     to preserve pass-through semantics.
 
     :param harness: A harness id (canonical or alias).
     :param explicit_args: Most-specific per-launch args, emitted last.
     :param config_layers: Config mappings ordered from least to most specific.
-    :param deduplicate: Collapse repeated Codex approval-bypass switches.
+    :param deduplicate: Normalize Codex full-bypass launch arguments.
     :returns: The resolved native-harness launch args.
     """
     canonical = _canonicalize(harness)
@@ -385,16 +394,67 @@ def resolve_harness_launch_args(
     resolved.extend(explicit_args)
     if not deduplicate:
         return resolved
-    bypass_arg = "--dangerously-bypass-approvals-and-sandbox"
-    deduplicated: list[str] = []
+    return _normalize_codex_full_bypass_args(resolved)
+
+
+def _normalize_codex_full_bypass_args(args: list[str]) -> list[str]:
+    """Remove policy overrides that conflict with Codex full bypass.
+
+    Codex accepts approval and sandbox settings as long flags, short flags,
+    and ``--config``/``-c`` assignments. Once full bypass is present, none of
+    those settings may weaken or conflict with it. Unrelated arguments,
+    including repeated config option/value units, retain their original order.
+
+    :param args: Fully layered native-harness launch arguments.
+    :returns: Normalized arguments, or *args* unchanged when bypass is absent.
+    """
+    if _CODEX_FULL_BYPASS_ARG not in args:
+        return args
+
+    normalized: list[str] = []
     bypass_seen = False
-    for arg in resolved:
-        if arg == bypass_arg:
-            if bypass_seen:
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == _CODEX_FULL_BYPASS_ARG:
+            if not bypass_seen:
+                normalized.append(arg)
+                bypass_seen = True
+            index += 1
+            continue
+
+        if arg in _CODEX_POLICY_FLAGS:
+            index += 1
+            if index < len(args) and not args[index].startswith("-"):
+                index += 1
+            continue
+        if any(arg.startswith(f"{flag}=") for flag in _CODEX_POLICY_FLAGS):
+            index += 1
+            continue
+
+        if arg in {"--config", "-c"} and index + 1 < len(args):
+            assignment = args[index + 1]
+            if _codex_policy_config_key(assignment):
+                index += 2
                 continue
-            bypass_seen = True
-        deduplicated.append(arg)
-    return deduplicated
+            normalized.extend((arg, assignment))
+            index += 2
+            continue
+        if arg.startswith(("--config=", "-c=")):
+            assignment = arg.split("=", 1)[1]
+            if _codex_policy_config_key(assignment):
+                index += 1
+                continue
+
+        normalized.append(arg)
+        index += 1
+    return normalized
+
+
+def _codex_policy_config_key(assignment: str) -> bool:
+    """Return whether a Codex config assignment controls launch permissions."""
+    key, separator, _value = assignment.partition("=")
+    return bool(separator) and key.strip() in _CODEX_POLICY_CONFIG_KEYS
 
 
 def config_harness_path_override(
