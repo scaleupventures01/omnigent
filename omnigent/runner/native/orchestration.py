@@ -999,6 +999,18 @@ async def _codex_native_launch_config(
         not isinstance(session_workspace, str) or not session_workspace
     ):
         raise RuntimeError(f"Invalid workspace for Codex session {session_id!r}.")
+    workspace = _codex_session_workspace(session_workspace)
+    from omnigent.config import load_global_config, load_local_config
+    from omnigent.harness_startup_config import resolve_harness_launch_args
+
+    terminal_launch_args = resolve_harness_launch_args(
+        "codex-native",
+        terminal_launch_args or (),
+        config_layers=(
+            load_global_config(),
+            load_local_config(workspace / ".omnigent" / "config.yaml"),
+        ),
+    )
     # Fork directives stamped on a clone at fork time. Only consulted when
     # the clone has no external_session_id of its own yet (see the
     # fork-source branch in _auto_create_codex_terminal); inert otherwise.
@@ -1037,7 +1049,7 @@ async def _codex_native_launch_config(
         labels=labels if isinstance(labels, dict) else None,
     )
     return _CodexNativeLaunchConfig(
-        workspace=_codex_session_workspace(session_workspace),
+        workspace=workspace,
         policy_server_url=_required_runner_env("RUNNER_SERVER_URL"),
         terminal_launch_args=terminal_launch_args,
         model_override=model_override,
