@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TypedDict
 
 _logger = logging.getLogger(__name__)
@@ -341,16 +341,50 @@ def resolve_harness_args(
         layer.
     :returns: The combined arg list: config base + CLI pass-through.
     """
-    base: list[str] = []
-    if cfg is not None:
-        canonical = _canonicalize(harness)
+    config_layers = () if cfg is None else (cfg,)
+    return resolve_harness_launch_args(
+        harness,
+        cli_args,
+        config_layers=config_layers,
+        deduplicate=False,
+    )
+
+
+def resolve_harness_launch_args(
+    harness: str,
+    explicit_args: Iterable[str],
+    *,
+    config_layers: Iterable[Mapping[str, object]] = (),
+    deduplicate: bool = True,
+) -> list[str]:
+    """Resolve ordered config layers plus explicit native-harness args.
+
+    Each config layer contributes ``harness.<canonical>.args`` in the order
+    supplied, followed by *explicit_args*. Exact duplicates are removed on
+    first occurrence by default. Direct CLI callers use
+    :func:`resolve_harness_args`, which disables deduplication to preserve
+    pass-through semantics.
+
+    :param harness: A harness id (canonical or alias).
+    :param explicit_args: Most-specific per-launch args, emitted last.
+    :param config_layers: Config mappings ordered from least to most specific.
+    :param deduplicate: Remove exact duplicate arguments while preserving order.
+    :returns: The resolved native-harness launch args.
+    """
+    canonical = _canonicalize(harness)
+    resolved: list[str] = []
+    for cfg in config_layers:
         _, overrides = resolve_harness_config(cfg)
         entry = overrides.get(canonical)
-        if entry is not None:
-            config_args = entry.get(_OVERRIDE_KEY_ARGS)
-            if isinstance(config_args, list):
-                base = list(config_args)
-    return [*base, *cli_args]
+        if entry is None:
+            continue
+        config_args = entry.get(_OVERRIDE_KEY_ARGS)
+        if isinstance(config_args, list):
+            resolved.extend(config_args)
+    resolved.extend(explicit_args)
+    if not deduplicate:
+        return resolved
+    return list(dict.fromkeys(resolved))
 
 
 def config_harness_path_override(
@@ -391,6 +425,7 @@ def config_harness_path_override(
 __all__ = [
     "config_harness_path_override",
     "resolve_harness_args",
+    "resolve_harness_launch_args",
     "resolve_harness_command",
     "resolve_harness_config",
     "resolve_harness_path",
