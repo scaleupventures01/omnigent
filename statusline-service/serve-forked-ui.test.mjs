@@ -7,6 +7,7 @@ import test from "node:test";
 import { __providerUsageTest } from "./serve-forked-ui.mjs";
 
 const {
+  cacheControlForStaticFile,
   createProviderRateLimitCollector,
   normalizeClaudeUsage,
   normalizeCodexRateLimits,
@@ -20,6 +21,18 @@ const {
 
 const FIVE_HOURS = 300;
 const ONE_WEEK = 10_080;
+
+test("revalidates the app entrypoint for root and SPA fallback requests", () => {
+  assert.equal(cacheControlForStaticFile("/srv/web-ui/index.html"), "no-cache");
+  assert.equal(cacheControlForStaticFile("/srv/web-ui/index.html"), "no-cache");
+});
+
+test("caches fingerprinted frontend assets immutably", () => {
+  assert.equal(
+    cacheControlForStaticFile("/srv/web-ui/assets/index-DvQVAfCY.js"),
+    "public, max-age=31536000, immutable",
+  );
+});
 
 test("normalizes Claude's live cache schema", () => {
   assert.deepEqual(
