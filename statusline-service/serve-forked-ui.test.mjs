@@ -14,6 +14,7 @@ const {
   parseCodexJsonLines,
   reclaimStaleKimiCredentialLock,
   redactProviderSecrets,
+  resolveCodexBinary,
   shouldRefreshKimiCredentials,
 } = __providerUsageTest;
 
@@ -59,6 +60,51 @@ test("parses Codex newline JSON frames and maps windows by duration", () => {
       weekly: { usedPercent: 44, resetsAt: 1_800_086_400 },
     },
   );
+});
+
+test("resolves Codex from the stable user install when launchd PATH excludes it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "omnigent-codex-bin-"));
+  const userBinary = path.join(root, ".local", "bin", "codex");
+  try {
+    await mkdir(path.dirname(userBinary), { recursive: true });
+    await writeFile(userBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await chmod(userBinary, 0o700);
+
+    assert.equal(
+      await resolveCodexBinary({
+        env: { HOME: root, PATH: "/usr/bin:/bin" },
+      }),
+      userBinary,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prefers the explicit Omnigent Codex binary override", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "omnigent-codex-override-"));
+  const overrideBinary = path.join(root, "custom-codex");
+  const userBinary = path.join(root, ".local", "bin", "codex");
+  try {
+    await mkdir(path.dirname(userBinary), { recursive: true });
+    await writeFile(overrideBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await writeFile(userBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await chmod(overrideBinary, 0o700);
+    await chmod(userBinary, 0o700);
+
+    assert.equal(
+      await resolveCodexBinary({
+        env: {
+          HOME: root,
+          PATH: path.dirname(userBinary),
+          OMNI_CODEX_BIN: overrideBinary,
+        },
+      }),
+      overrideBinary,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("normalizes Kimi's current nested detail and top-level weekly usage", () => {
