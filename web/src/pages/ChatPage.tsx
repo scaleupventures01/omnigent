@@ -4194,18 +4194,23 @@ function ComposerStatusLine({
         className={cn("flex-none whitespace-nowrap", unavailable && "text-muted-foreground")}
       >
         <strong className="font-semibold">{label}</strong>{" "}
-        5h{" "}
-        {fiveHour == null ? (
-          "n/a"
-        ) : (
+        {(id !== "chatgpt" || fiveHour != null) && (
           <>
-            <span className={rlUsedClass(fiveHour.usedPercent)}>
-              {Math.round(fiveHour.usedPercent)}%
-            </span>
-            {` (${rateLimitLeftHours(fiveHour.resetsAt - now / 1000)} left)`}
+            5h{" "}
+            {fiveHour == null ? (
+              "n/a"
+            ) : (
+              <>
+                <span className={rlUsedClass(fiveHour.usedPercent)}>
+                  {Math.round(fiveHour.usedPercent)}%
+                </span>
+                {` (${rateLimitLeftHours(fiveHour.resetsAt - now / 1000)} left)`}
+              </>
+            )}
+            {"  "}
           </>
         )}
-        {"  wk "}
+        wk{" "}
         {weekly == null ? (
           "n/a"
         ) : (
