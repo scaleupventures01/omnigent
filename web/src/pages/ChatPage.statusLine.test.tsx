@@ -378,7 +378,7 @@ describe("Composer provider usage status", () => {
         weekly: { usedPercent: 34, resetsAt: 1_800_086_400 },
       },
       chatgpt: {
-        fiveHour: { usedPercent: 56, resetsAt: 1_800_000_000 },
+        fiveHour: null,
         weekly: { usedPercent: 78, resetsAt: 1_800_086_400 },
       },
       kimi: {
@@ -446,7 +446,7 @@ describe("Composer provider usage status", () => {
 
     expect(claude).toHaveTextContent(/5h\s+12%/);
     expect(claude).toHaveTextContent(/wk\s+34%/);
-    expect(chatgpt).toHaveTextContent(/5h\s+56%/);
+    expect(chatgpt).not.toHaveTextContent(/5h/);
     expect(chatgpt).toHaveTextContent(/wk\s+78%/);
     expect(kimi).toHaveTextContent(/5h\s+90%/);
     expect(kimi).toHaveTextContent(/wk\s+23%/);
@@ -466,7 +466,8 @@ describe("Composer provider usage status", () => {
     const kimi = within(metrics).getByTestId("provider-usage-kimi");
 
     expect(claude).toHaveTextContent(/5h\s+12%.*wk\s+34%/);
-    expect(chatgpt).toHaveTextContent(/5h\s+56%.*wk\s+78%/);
+    expect(chatgpt).not.toHaveTextContent(/5h/);
+    expect(chatgpt).toHaveTextContent(/wk\s+78%/);
     expect(kimi).toHaveTextContent(/5h\s+90%.*wk\s+n\/a/);
   });
 });
