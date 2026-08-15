@@ -610,6 +610,7 @@ function createProviderRateLimitCollector({
 export const collectProviderRateLimits = createProviderRateLimitCollector();
 
 export const __providerUsageTest = Object.freeze({
+  cacheControlForStaticFile,
   createProviderRateLimitCollector,
   normalizeClaudeUsage,
   normalizeCodexRateLimits,
@@ -726,6 +727,14 @@ async function resolveStaticFile(pathname) {
   return INDEX_FILE;
 }
 
+function cacheControlForStaticFile(filePath) {
+  const segments = path.normalize(filePath).split(path.sep);
+  const fileName = segments.at(-1) ?? "";
+  const isFingerprint =
+    segments.at(-2) === "assets" && /-[A-Za-z0-9_-]{8,}\.[^.]+$/.test(fileName);
+  return isFingerprint ? "public, max-age=31536000, immutable" : "no-cache";
+}
+
 async function serveStaticRequest(request, response, pathname) {
   if (request.method !== "GET" && request.method !== "HEAD") {
     response.setHeader("Allow", "GET, HEAD");
@@ -740,6 +749,7 @@ async function serveStaticRequest(request, response, pathname) {
   response.writeHead(200, {
     "Content-Type": contentType,
     "Content-Length": fileStat.size,
+    "Cache-Control": cacheControlForStaticFile(filePath),
     "X-Content-Type-Options": "nosniff",
   });
 
