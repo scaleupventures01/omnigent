@@ -260,14 +260,15 @@ function normalizeCodexRateLimits(limits = {}) {
   };
 }
 
-async function findCodexBinary() {
+async function resolveCodexBinary({ env = process.env, userHome = env.HOME ?? USER_HOME } = {}) {
   const candidates = [
-    process.env.CODEX_BIN,
-    ...String(process.env.PATH ?? "")
+    env.OMNI_CODEX_BIN,
+    ...String(env.PATH ?? "")
       .split(path.delimiter)
       .filter(Boolean)
       .map((directory) => path.join(directory, "codex")),
-    path.join(USER_HOME, ".npm-global", "bin", "codex"),
+    path.join(userHome, ".local", "bin", "codex"),
+    path.join(userHome, ".npm-global", "bin", "codex"),
   ].filter(Boolean);
 
   for (const candidate of [...new Set(candidates)]) {
@@ -278,11 +279,11 @@ async function findCodexBinary() {
       // Try the next installed location.
     }
   }
-  throw new Error("Codex executable not found on PATH");
+  return "codex";
 }
 
 async function readCodexUsage() {
-  const codexBinary = await findCodexBinary();
+  const codexBinary = await resolveCodexBinary();
 
   return await new Promise((resolve, reject) => {
     const child = spawn(codexBinary, ["app-server", "--listen", "stdio://"], {
@@ -616,6 +617,7 @@ export const __providerUsageTest = Object.freeze({
   parseCodexJsonLines,
   reclaimStaleKimiCredentialLock,
   redactProviderSecrets,
+  resolveCodexBinary,
   shouldRefreshKimiCredentials,
 });
 
