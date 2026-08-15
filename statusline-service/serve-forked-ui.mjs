@@ -57,9 +57,16 @@ const CONTENT_TYPES = new Map([
   [".txt", "text/plain; charset=utf-8"],
 ]);
 
+function redactProviderSecrets(value) {
+  return String(value)
+    .replace(/(Authorization:\s*Bearer\s+)[^\s]+/gi, "$1[redacted]")
+    .replace(/((?:access_token|refresh_token)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/("(?:access_token|refresh_token)"\s*:\s*")[^"]+/gi, "$1[redacted]");
+}
+
 function logError(context, error) {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(`[forked-ui] ${context}: ${message}`);
+  console.error(`[forked-ui] ${context}: ${redactProviderSecrets(message)}`);
 }
 
 function parseRequestUrl(rawUrl) {
@@ -200,20 +207,56 @@ function emptyProviderUsage() {
   return { fiveHour: null, weekly: null };
 }
 
+function normalizeClaudeUsage(raw) {
+  return {
+    fiveHour: usageWindow(
+      raw?.five_hour?.used_percentage ?? raw?.five_hour?.pct,
+      raw?.five_hour?.resets_at ?? raw?.five_hour?.resets,
+    ),
+    weekly: usageWindow(
+      raw?.seven_day?.used_percentage ?? raw?.seven_day?.pct,
+      raw?.seven_day?.resets_at ?? raw?.seven_day?.resets,
+    ),
+  };
+}
+
 async function readClaudeUsage() {
   const raw = JSON.parse(await readFile(RATELIMITS_FILE, "utf8"));
   return {
     raw,
-    usage: {
-      fiveHour: usageWindow(
-        raw?.five_hour?.used_percentage ?? raw?.five_hour?.pct,
-        raw?.five_hour?.resets_at ?? raw?.five_hour?.resets,
-      ),
-      weekly: usageWindow(
-        raw?.seven_day?.used_percentage ?? raw?.seven_day?.pct,
-        raw?.seven_day?.resets_at ?? raw?.seven_day?.resets,
-      ),
-    },
+    usage: normalizeClaudeUsage(raw),
+  };
+}
+
+function parseCodexJsonLines(remainder, chunk) {
+  let buffer = `${remainder}${chunk}`;
+  const messages = [];
+  let newline = buffer.indexOf("\n");
+  while (newline >= 0) {
+    const line = buffer.slice(0, newline).trim();
+    buffer = buffer.slice(newline + 1);
+    newline = buffer.indexOf("\n");
+    if (!line) continue;
+    try {
+      messages.push(JSON.parse(line));
+    } catch {
+      // Ignore non-JSON diagnostic lines from the child process.
+    }
+  }
+  return { messages, remainder: buffer };
+}
+
+function normalizeCodexRateLimits(limits = {}) {
+  const windows = [limits.primary, limits.secondary].filter(Boolean);
+  const fiveHour = windows.find(
+    (window) => finiteNumber(window?.windowDurationMins) === 300,
+  );
+  const weekly = windows.find(
+    (window) => finiteNumber(window?.windowDurationMins) === 10_080,
+  );
+  return {
+    fiveHour: usageWindow(fiveHour?.usedPercent, fiveHour?.resetsAt),
+    weekly: usageWindow(weekly?.usedPercent, weekly?.resetsAt),
   };
 }
 
@@ -270,21 +313,9 @@ async function readCodexUsage() {
     });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      buffer += chunk;
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-        if (!line) continue;
-
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          continue;
-        }
-
+      const parsed = parseCodexJsonLines(buffer, chunk);
+      buffer = parsed.remainder;
+      for (const message of parsed.messages) {
         if (message.id === 1 && message.result != null) {
           send({ method: "initialized", params: {} });
           send({ id: 2, method: "account/rateLimits/read", params: {} });
@@ -294,17 +325,7 @@ async function readCodexUsage() {
             return;
           }
           const limits = message.result?.rateLimits ?? message.result ?? {};
-          const windows = [limits.primary, limits.secondary].filter(Boolean);
-          const fiveHour =
-            windows.find((window) => finiteNumber(window?.windowDurationMins) === 300) ??
-            (limits.primary?.windowDurationMins == null ? limits.primary : null);
-          const weekly =
-            windows.find((window) => finiteNumber(window?.windowDurationMins) === 10_080) ??
-            (limits.secondary?.windowDurationMins == null ? limits.secondary : null);
-          finish(null, {
-            fiveHour: usageWindow(fiveHour?.usedPercent, fiveHour?.resetsAt),
-            weekly: usageWindow(weekly?.usedPercent, weekly?.resetsAt),
-          });
+          finish(null, normalizeCodexRateLimits(limits));
           return;
         }
       }
@@ -357,7 +378,14 @@ async function fetchJson(url, options) {
   }
 }
 
-async function reclaimStaleKimiCredentialLock(lockDirectory) {
+async function reclaimStaleKimiCredentialLock(
+  lockDirectory,
+  {
+    nowMs = Date.now(),
+    staleMs = KIMI_LOCK_STALE_MS,
+    settle = () => new Promise((resolve) => setTimeout(resolve, 50)),
+  } = {},
+) {
   let first;
   try {
     first = await stat(lockDirectory);
@@ -365,9 +393,9 @@ async function reclaimStaleKimiCredentialLock(lockDirectory) {
     if (error?.code === "ENOENT") return true;
     throw error;
   }
-  if (Date.now() - first.mtimeMs <= KIMI_LOCK_STALE_MS) return false;
+  if (nowMs - first.mtimeMs <= staleMs) return false;
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await settle();
   let second;
   try {
     second = await stat(lockDirectory);
@@ -377,7 +405,7 @@ async function reclaimStaleKimiCredentialLock(lockDirectory) {
   }
   const unchanged =
     first.dev === second.dev && first.ino === second.ino && first.mtimeMs === second.mtimeMs;
-  if (!unchanged || Date.now() - second.mtimeMs <= KIMI_LOCK_STALE_MS) return false;
+  if (!unchanged || nowMs - second.mtimeMs <= staleMs) return false;
 
   const staleDirectory = `${lockDirectory}.stale-${process.pid}-${Date.now()}`;
   try {
@@ -484,6 +512,10 @@ async function readKimiUsage() {
   const payload = await fetchJson(KIMI_USAGE_URL, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+  return normalizeKimiUsagePayload(payload);
+}
+
+function normalizeKimiUsagePayload(payload) {
   const limits = Array.isArray(payload?.limits) ? payload.limits : [];
   const fiveHour = limits.find(
     (row) =>
@@ -510,56 +542,82 @@ async function readKimiUsage() {
   };
 }
 
-const providerCache = {
-  value: null,
-  expiresAt: 0,
-  inFlight: null,
-};
+function createProviderRateLimitCollector({
+  ttlMs = PROVIDER_CACHE_TTL_MS,
+  now = Date.now,
+  collectors = {
+    claude: readClaudeUsage,
+    chatgpt: readCodexUsage,
+    kimi: readKimiUsage,
+  },
+  onError = logError,
+} = {}) {
+  const cache = {
+    value: null,
+    expiresAt: 0,
+    inFlight: null,
+  };
 
-export async function collectProviderRateLimits() {
-  if (providerCache.value != null && Date.now() < providerCache.expiresAt) {
-    return providerCache.value;
-  }
-  if (providerCache.inFlight != null) return await providerCache.inFlight;
+  return async function collect() {
+    if (cache.value != null && now() < cache.expiresAt) return cache.value;
+    if (cache.inFlight != null) return await cache.inFlight;
 
-  providerCache.inFlight = (async () => {
-    const providers = {
-      claude: emptyProviderUsage(),
-      chatgpt: emptyProviderUsage(),
-      kimi: emptyProviderUsage(),
-    };
-    let claudeLegacy = null;
-    const collectors = [readClaudeUsage(), readCodexUsage(), readKimiUsage()];
-    const results = await Promise.allSettled(collectors);
+    cache.inFlight = (async () => {
+      const providers = {
+        claude: emptyProviderUsage(),
+        chatgpt: emptyProviderUsage(),
+        kimi: emptyProviderUsage(),
+      };
+      let claudeLegacy = null;
+      const results = await Promise.allSettled([
+        collectors.claude(),
+        collectors.chatgpt(),
+        collectors.kimi(),
+      ]);
 
-    if (results[0].status === "fulfilled") {
-      providers.claude = results[0].value.usage;
-      claudeLegacy = results[0].value.raw;
-    } else {
-      logError("Claude rate-limit collector failed", results[0].reason);
+      if (results[0].status === "fulfilled") {
+        providers.claude = results[0].value.usage;
+        claudeLegacy = results[0].value.raw;
+      } else {
+        onError("Claude rate-limit collector failed", results[0].reason);
+      }
+      if (results[1].status === "fulfilled") providers.chatgpt = results[1].value;
+      else onError("ChatGPT rate-limit collector failed", results[1].reason);
+      if (results[2].status === "fulfilled") providers.kimi = results[2].value;
+      else onError("Kimi rate-limit collector failed", results[2].reason);
+
+      const capturedAtMs = now();
+      const value = {
+        ...(claudeLegacy ?? {}),
+        capturedAtMs,
+        providers,
+        claudeLegacy,
+      };
+      cache.value = value;
+      cache.expiresAt = capturedAtMs + ttlMs;
+      return value;
+    })();
+
+    try {
+      return await cache.inFlight;
+    } finally {
+      cache.inFlight = null;
     }
-    if (results[1].status === "fulfilled") providers.chatgpt = results[1].value;
-    else logError("ChatGPT rate-limit collector failed", results[1].reason);
-    if (results[2].status === "fulfilled") providers.kimi = results[2].value;
-    else logError("Kimi rate-limit collector failed", results[2].reason);
-
-    const value = {
-      ...(claudeLegacy ?? {}),
-      capturedAtMs: Date.now(),
-      providers,
-      claudeLegacy,
-    };
-    providerCache.value = value;
-    providerCache.expiresAt = Date.now() + PROVIDER_CACHE_TTL_MS;
-    return value;
-  })();
-
-  try {
-    return await providerCache.inFlight;
-  } finally {
-    providerCache.inFlight = null;
-  }
+  };
 }
+
+export const collectProviderRateLimits = createProviderRateLimitCollector();
+
+export const __providerUsageTest = Object.freeze({
+  createProviderRateLimitCollector,
+  normalizeClaudeUsage,
+  normalizeCodexRateLimits,
+  normalizeKimiUsagePayload,
+  parseCodexJsonLines,
+  reclaimStaleKimiCredentialLock,
+  redactProviderSecrets,
+  shouldRefreshKimiCredentials,
+});
 
 async function serveRateLimits(_request, response) {
   const payload = await collectProviderRateLimits();
