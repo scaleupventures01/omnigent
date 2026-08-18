@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>POC — sidebar status colours: pink = working, green = done</title>
+<!--
+  Self-contained visual POC. No build step, no external requests.
+  Open with: open web/poc-status-colors.html
+
+  Every status hex below is copied EXACTLY from web/src/index.css:
+    --brand-accent: #df3c85   (light index.css:270, dark :355)  -> Tailwind bg/text-brand-accent
+    --success:      #2ea65c   (light index.css:252, dark :345)  -> Tailwind bg/text-success
+    --warning:      #d4972a   (light index.css:253, dark :346)  -> Tailwind bg/text-warning
+  All other hexes are neutral greys used only for the mock sidebar chrome.
+
+  Real geometry reproduced from the components:
+    - unseen/done dot: size-1.5 = 6px filled circle (SessionStateBadge.tsx Dot)
+    - running/starting indicator: size-2.5 = 10px lucide Loader2 spinner,
+      animate-spin = 1s linear infinite (RunningDot.tsx, path inlined below)
+    - awaiting badge: pill, 25%-alpha warning background, full-strength
+      warning text ("Needs response")
+-->
+<style>
+  /* ---- Real tokens, both themes (same values light and dark per index.css) ---- */
+  .theme-light {
+    --pink: #df3c85;
+    --green: #2ea65c;
+    --amber: #d4972a;
+    /* neutral greys — mock chrome only */
+    --page: #ffffff;
+    --surface: #f5f5f5;
+    --border: #e5e5e5;
+    --text: #262626;
+    --muted: #737373;
+  }
+  .theme-dark {
+    --pink: #df3c85;
+    --green: #2ea65c;
+    --amber: #d4972a;
+    /* neutral greys — mock chrome only */
+    --page: #0a0a0a;
+    --surface: #171717;
+    --border: #262626;
+    --text: #e5e5e5;
+    --muted: #a3a3a3;
+  }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #d4d4d4;
+    color: #262626;
+    padding: 24px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 0 0 12px; }
+  .sub { color: #525252; font-size: 13px; margin: 0 0 16px; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+
+  .legend {
+    background: #ffffff;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    line-height: 1.9;
+  }
+  .legend .note { color: #525252; font-size: 12px; }
+
+  .themes { display: flex; gap: 20px; align-items: flex-start; }
+  .theme {
+    flex: 1;
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .columns { display: flex; gap: 16px; }
+  .col { flex: 1; }
+  .col h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 8px;
+  }
+
+  /* ---- Mock sidebar ---- */
+  .sidebar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    width: 240px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .row .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .marker { display: inline-flex; align-items: center; justify-content: center; height: 20px; }
+  .row.project { font-weight: 600; }
+  .chevron { color: var(--muted); font-size: 11px; }
+  .caption {
+    font-size: 11px;
+    color: var(--muted);
+    padding: 0 8px 6px 26px;
+    margin-top: -4px;
+  }
+  .caption .hex { color: var(--muted); }
+  .divider { border-top: 1px solid var(--border); margin: 6px 4px; }
+
+  /* ---- Markers, real geometry ---- */
+  .dot { width: 6px; height: 6px; border-radius: 9999px; flex-shrink: 0; }   /* size-1.5 */
+  .dot.pink { background: var(--pink); }
+  .dot.green { background: var(--green); }
+
+  .spinner { width: 10px; height: 10px; flex-shrink: 0; animation: spin 1s linear infinite; } /* size-2.5 + animate-spin */
+  .spinner.grey { color: var(--muted); }
+  .spinner.pink { color: var(--pink); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 9999px;
+    border: 1px solid transparent;
+    padding: 1px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(212, 151, 42, 0.25);  /* bg-warning/25 — #d4972a at 25% alpha */
+    color: var(--amber);                    /* text-warning — #d4972a */
+  }
+</style>
+</head>
+<body>
+  <h1>Sidebar status colours — before / after</h1>
+  <p class="sub">Spec: “pink can be a message sent but green needs to be everything is completely done no more work going”.</p>
+
+  <div class="legend">
+    <strong>New scheme legend</strong><br />
+    <span class="dot pink" style="display:inline-block; vertical-align:middle;"></span>
+    &nbsp;PINK <code>#df3c85</code> (<code>--brand-accent</code>) = working / processing / a send in flight — animated spinner<br />
+    <span class="dot green" style="display:inline-block; vertical-align:middle;"></span>
+    &nbsp;GREEN <code>#2ea65c</code> (<code>--success</code>) = everything completely done, no more work going — static 6px dot<br />
+    <span class="badge" style="--amber:#d4972a; background:rgba(212,151,42,0.25); color:#d4972a;">Needs response</span>
+    &nbsp;AMBER <code>#d4972a</code> (<code>--warning</code>) = an approval prompt is waiting (unchanged)<br />
+    <span class="note">Note: in the app today the “Needs response” badge actually renders in pink
+    (<code>bg-brand-accent/15 text-brand-accent</code>, SessionStateBadge.tsx). It is drawn here in amber per the
+    spec, and left untouched in code by this POC — flagging the collision for a follow-up.</span>
+  </div>
+
+  <div class="themes" id="themes"></div>
+
+<script>
+  // The mock sidebar is identical per theme; only the CSS custom properties differ.
+  // Each entry: [kind, title, caption, beforeMarker, afterMarker]
+  const LOADER_PATH = "M21 12a9 9 0 1 1-6.219-8.56"; // lucide Loader2, inlined — no icon font
+  const spinner = (tone) =>
+    `<span class="marker"><svg class="spinner ${tone}" viewBox="0 0 24 24" fill="none" ` +
+    `stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+    `<path d="${LOADER_PATH}"/></svg></span>`;
+  const dot = (tone) => `<span class="marker"><span class="dot ${tone}"></span></span>`;
+  const badge = `<span class="marker"><span class="badge">Needs response</span></span>`;
+  const none = `<span class="marker"></span>`;
+
+  const PINK = "#df3c85", GREEN = "#2ea65c", AMBER = "#d4972a";
+
+  const rows = [
+    {
+      cls: "project",
+      title: "▸ Project A (collapsed)",
+      caption: `THE BUG CASE — contains a done-unread chat AND a still-running chat. ` +
+        `BEFORE shows the “done” marker (static pink dot ${PINK}) while work is still running; ` +
+        `AFTER shows the “working” spinner (${PINK}).`,
+      before: dot("pink"),
+      after: spinner("pink"),
+    },
+    {
+      cls: "project",
+      title: "▸ Project B (collapsed)",
+      caption: `All chats done-unread — the “done” marker. BEFORE pink dot ${PINK}; AFTER green dot ${GREEN}.`,
+      before: dot("pink"),
+      after: dot("green"),
+    },
+    { divider: true },
+    {
+      cls: "",
+      title: "Running chat",
+      caption: `running — spinner 10px. BEFORE grey; AFTER pink ${PINK}.`,
+      before: spinner("grey"),
+      after: spinner("pink"),
+    },
+    {
+      cls: "",
+      title: "Starting chat",
+      caption: `starting (send in flight) — same spinner as running. BEFORE grey; AFTER pink ${PINK}.`,
+      before: spinner("grey"),
+      after: spinner("pink"),
+    },
+    {
+      cls: "",
+      title: "Done, unread chat",
+      caption: `done-unread — static 6px dot. BEFORE pink ${PINK}; AFTER green ${GREEN}.`,
+      before: dot("pink"),
+      after: dot("green"),
+    },
+    {
+      cls: "",
+      title: "Chat awaiting approval",
+      caption: `awaiting — amber “Needs response” pill ${AMBER} (25%-alpha background). Unchanged.`,
+      before: badge,
+      after: badge,
+    },
+    {
+      cls: "",
+      title: "Idle, read chat",
+      caption: `idle and read — no marker.`,
+      before: none,
+      after: none,
+    },
+  ];
+
+  function sidebar(markerKey) {
+    return rows
+      .map((r) => {
+        if (r.divider) return `<div class="divider"></div>`;
+        const chevron = r.cls === "project" ? "" : "";
+        return (
+          `<div class="row ${r.cls}"><span class="title">${chevron}${r.title}</span>${r[markerKey]}</div>` +
+          `<div class="caption">${r.caption}</div>`
+        );
+      })
+      .join("");
+  }
+
+  document.getElementById("themes").innerHTML = ["light", "dark"]
+    .map(
+      (theme) => `
+      <section class="theme theme-${theme}">
+        <h2>${theme === "light" ? "Light" : "Dark"} theme</h2>
+        <div class="columns">
+          <div class="col"><h3>Before</h3><div class="sidebar">${sidebar("before")}</div></div>
+          <div class="col"><h3>After</h3><div class="sidebar">${sidebar("after")}</div></div>
+        </div>
+      </section>`,
+    )
+    .join("");
+</script>
+</body>
+</html>

@@ -1081,13 +1081,11 @@ describe("SubagentsPanel", () => {
         .getByTestId("subagent-status-dot")
         .querySelector("span.rounded-full");
 
-    // Working reuses the sidebar RunningDot in the grey tone —
+    // Working reuses the sidebar RunningDot in the brand-pink tone —
     // identical to the sidebar's running indicator; a wrong tone drops
-    // text-muted-foreground.
+    // text-brand-accent.
     expect(
-      childRow(container, "c_work").querySelector(
-        '[data-testid="running-dot"].text-muted-foreground',
-      ),
+      childRow(container, "c_work").querySelector('[data-testid="running-dot"].text-brand-accent'),
     ).not.toBeNull();
 
     // Panel-scoped palette swap: the quiet live/settled states read in the

@@ -10,10 +10,15 @@ export type MarkerConversation = Pick<
 >;
 
 /**
- * Aggregate the sidebar marker for a project from its conversations, using
- * the same precedence a row uses (awaiting > unseen > running). Returned as a
+ * Aggregate the sidebar marker for a project from its conversations, with
+ * precedence awaiting > running > unseen > none. Returned as a
  * {@link SessionState} so a collapsed project header can render the exact
  * same {@link SessionStateBadge} the rows do. ``null`` = no marker.
+ *
+ * The marker is a claim about the whole project: one containing any running
+ * chat is not done, so `running` outranks `unseen`. Over-reporting
+ * work-in-progress costs the user a click; under-reporting it costs them the
+ * turn they walked away from.
  */
 export function projectMarkerState(conversations: MarkerConversation[]): SessionState | null {
   let awaiting = 0;
@@ -30,7 +35,7 @@ export function projectMarkerState(conversations: MarkerConversation[]): Session
     }
   }
   if (awaiting > 0) return { kind: "awaiting", count: awaiting };
-  if (unseen) return { kind: "unseen" };
   if (running) return { kind: "running" };
+  if (unseen) return { kind: "unseen" };
   return null;
 }

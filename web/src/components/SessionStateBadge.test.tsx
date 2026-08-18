@@ -33,16 +33,16 @@ describe("SessionStateBadge — per-state rendering", () => {
     );
   });
 
-  it("renders running with a spinning grey spinner", () => {
+  it("renders running with a spinning pink spinner", () => {
     const { container } = renderBadge({ kind: "running" });
     const badge = screen.getByTestId("session-state-badge");
     expect(badge).toHaveAttribute("data-state", "running");
-    // The running indicator is a grey spinner; a missing spinner
-    // (or the old success-tone dot grid) means it regressed.
+    // The running indicator is a brand-pink spinner; a missing spinner
+    // (or a success-tone dot) means it regressed — green means done.
     const spinner = container.querySelector('[data-testid="running-dot"]');
     expect(spinner).not.toBeNull();
     expect(spinner?.getAttribute("class")).toContain("animate-spin");
-    expect(spinner?.getAttribute("class")).toContain("text-muted-foreground");
+    expect(spinner?.getAttribute("class")).toContain("text-brand-accent");
     expect(spinner?.getAttribute("class")).toContain("size-2.5");
     expect(container.querySelector(".bg-success")).toBeNull();
   });
@@ -57,17 +57,18 @@ describe("SessionStateBadge — per-state rendering", () => {
     expect(spinner?.getAttribute("class")).toContain("animate-spin");
   });
 
-  it("renders unseen messages as a solid (non-pulsing) brand-pink dot", () => {
+  it("renders unseen messages as a solid (non-pulsing) success-green dot", () => {
     const { container } = renderBadge({ kind: "unseen" });
     const badge = screen.getByTestId("session-state-badge");
     expect(badge).toHaveAttribute("aria-label", "New messages");
     expect(badge).toHaveAttribute("data-state", "unseen");
-    // Unread reuses the brand-pink token but stays static; the pulsing
-    // variant (running-pulse-dot) is reserved for the running state.
-    const dot = container.querySelector(".bg-brand-accent");
+    // Unread means done: a static success-green dot. Brand pink is now
+    // reserved for the running/starting spinner.
+    const dot = container.querySelector(".bg-success");
     expect(dot).not.toBeNull();
     expect(dot?.getAttribute("class")).toContain("size-1.5");
     expect(dot?.getAttribute("class")).not.toContain("running-pulse-dot");
+    expect(container.querySelector(".bg-brand-accent")).toBeNull();
     expect(container.querySelector(".bg-info")).toBeNull();
   });
 });

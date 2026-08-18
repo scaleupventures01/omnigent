@@ -7,7 +7,7 @@ export function RunningDot({ className }: { className?: string }) {
       aria-hidden
       role="presentation"
       data-testid="running-dot"
-      className={cn("size-3 shrink-0 animate-spin text-muted-foreground", className)}
+      className={cn("size-3 shrink-0 animate-spin text-brand-accent", className)}
     />
   );
 }

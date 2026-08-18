@@ -52,13 +52,13 @@ function describe(state: SessionState): Visual {
         render: () => <RunningDot className="size-2.5" />,
       };
     case "unseen":
-      // Solid brand-pink dot — distinguished from the running indicator,
-      // which is a grey spinner.
+      // Solid success-green dot — the work is done. The running/starting
+      // indicator is a brand-pink spinner, so pink now means "in flight".
       return {
         kind: state.kind,
         ariaLabel: "New messages",
         tooltip: "New messages",
-        render: () => <Dot tone="bg-brand-accent" />,
+        render: () => <Dot tone="bg-success" />,
       };
   }
 }

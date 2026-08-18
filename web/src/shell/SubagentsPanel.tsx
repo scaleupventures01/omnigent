@@ -321,7 +321,7 @@ function brandChildIcon(child: ChildSessionInfo): AgentRowIcon | null {
 
 /**
  * Indicator + optional label shared by the main and child rows. The working
- * state reuses the sidebar's RunningDot in the same grey tone, so
+ * state reuses the sidebar's RunningDot in the same brand-pink tone, so
  * "active" reads identically across the app; other states are a single
  * tokenized dot.
  *
