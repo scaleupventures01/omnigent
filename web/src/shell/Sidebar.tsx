@@ -160,6 +160,7 @@ import {
   readSessionFilter,
   writeSessionFilter,
 } from "@/lib/sessionFilterPreferences";
+import { projectMarkerState } from "@/shell/projectMarkerState";
 import { NewProjectButton } from "./NewProjectButton";
 import { SettingsSidebarBody, useSettingsRoute, useTrackSettingsReturn } from "./settingsNav";
 import {
@@ -2130,32 +2131,6 @@ function UngroupDropZone() {
       Drop here to remove from project
     </div>
   );
-}
-
-/**
- * Aggregate the sidebar marker for a project from its conversations, using
- * the same precedence a row uses (awaiting > unseen > running). Returned as a
- * {@link SessionState} so a collapsed project header can render the exact
- * same {@link SessionStateBadge} the rows do. ``null`` = no marker.
- */
-function projectMarkerState(conversations: Conversation[]): SessionState | null {
-  let awaiting = 0;
-  let unseen = false;
-  let running = false;
-  for (const c of conversations) {
-    const pending = c.pending_elicitations_count ?? 0;
-    if (pending > 0) {
-      awaiting += pending;
-    } else if (isConversationUnseen(c.id, c.updated_at, c.status)) {
-      unseen = true;
-    } else if (c.status === "running") {
-      running = true;
-    }
-  }
-  if (awaiting > 0) return { kind: "awaiting", count: awaiting };
-  if (unseen) return { kind: "unseen" };
-  if (running) return { kind: "running" };
-  return null;
 }
 
 // The shared collapsible header used by every sidebar section and section
