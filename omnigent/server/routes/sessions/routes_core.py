@@ -114,6 +114,7 @@ from omnigent.server.routes._sessions.helpers import (
     _apply_liveness_to_items,
     _authorize_bundled_parent_and_inherit_runner,
     _codex_plan_mode_enabled,
+    _collect_descendant_conversation_ids_by_root,
     _discovery_key,
     _forward_session_change_to_runner,
     _get_runner_client,
@@ -938,13 +939,10 @@ def register_core_routes(
         unique_agent_ids = list({c.agent_id for c in page.data if c.agent_id is not None})
         perms_by_conv: dict[str, list[SessionPermission]]
         if permission_store is not None:
-            perms_by_conv, agent_names_by_id, child_ids_by_parent = await asyncio.gather(
+            perms_by_conv, agent_names_by_id, descendant_ids_by_root = await asyncio.gather(
                 asyncio.to_thread(permission_store.list_for_sessions, conv_ids),
                 asyncio.to_thread(agent_store.get_names, unique_agent_ids),
-                asyncio.to_thread(
-                    conversation_store.list_child_conversation_ids_by_parent,
-                    conv_ids,
-                ),
+                _collect_descendant_conversation_ids_by_root(conversation_store, conv_ids),
             )
             user_is_admin = (
                 await asyncio.to_thread(permission_store.is_admin, user_id)
@@ -952,12 +950,9 @@ def register_core_routes(
                 else False
             )
         else:
-            agent_names_by_id, child_ids_by_parent = await asyncio.gather(
+            agent_names_by_id, descendant_ids_by_root = await asyncio.gather(
                 asyncio.to_thread(agent_store.get_names, unique_agent_ids),
-                asyncio.to_thread(
-                    conversation_store.list_child_conversation_ids_by_parent,
-                    conv_ids,
-                ),
+                _collect_descendant_conversation_ids_by_root(conversation_store, conv_ids),
             )
             perms_by_conv = {}
             user_is_admin = False
@@ -966,11 +961,11 @@ def register_core_routes(
         pending_counts = pending_elicitations.counts_for(conv_ids)
         comments_fingerprints = await _comments_fingerprints_for(conv_ids)
         # One SELECT for the whole page — the status rollup's fallback for
-        # children whose runner tunnel lives on another replica (no local
+        # descendants whose runner tunnel lives on another replica (no local
         # cache entry).
-        all_child_ids = list({cid for ids in child_ids_by_parent.values() for cid in ids})
+        all_descendant_ids = list({cid for ids in descendant_ids_by_root.values() for cid in ids})
         child_db_statuses = await asyncio.to_thread(
-            conversation_store.get_session_live_statuses, all_child_ids
+            conversation_store.get_session_live_statuses, all_descendant_ids
         )
         items: list[SessionListItem] = [
             _build_session_list_item(
@@ -981,7 +976,7 @@ def register_core_routes(
                 user_is_admin=user_is_admin,
                 permissions_enabled=permission_store is not None,
                 pending_count=pending_counts.get(conv.id, 0),
-                child_session_ids=child_ids_by_parent[conv.id],
+                child_session_ids=descendant_ids_by_root[conv.id],
                 comments_fingerprint=comments_fingerprints.get(conv.id),
                 child_db_statuses=child_db_statuses,
             )
@@ -1094,18 +1089,15 @@ def register_core_routes(
             return []
         unique_agent_ids = list({c.agent_id for c in convs if c.agent_id is not None})
         conv_ids = [c.id for c in convs]
-        agent_names_by_id, child_ids_by_parent, comments_fingerprints = await asyncio.gather(
+        agent_names_by_id, descendant_ids_by_root, comments_fingerprints = await asyncio.gather(
             asyncio.to_thread(agent_store.get_names, unique_agent_ids),
-            asyncio.to_thread(
-                conversation_store.list_child_conversation_ids_by_parent,
-                conv_ids,
-            ),
+            _collect_descendant_conversation_ids_by_root(conversation_store, conv_ids),
             _comments_fingerprints_for(conv_ids),
         )
         pending_counts = pending_elicitations.counts_for(conv_ids)
-        all_child_ids = list({cid for ids in child_ids_by_parent.values() for cid in ids})
+        all_descendant_ids = list({cid for ids in descendant_ids_by_root.values() for cid in ids})
         child_db_statuses = await asyncio.to_thread(
-            conversation_store.get_session_live_statuses, all_child_ids
+            conversation_store.get_session_live_statuses, all_descendant_ids
         )
         items = [
             _build_session_list_item(
@@ -1116,7 +1108,7 @@ def register_core_routes(
                 user_is_admin=user_is_admin,
                 permissions_enabled=permission_store is not None,
                 pending_count=pending_counts.get(conv.id, 0),
-                child_session_ids=child_ids_by_parent[conv.id],
+                child_session_ids=descendant_ids_by_root[conv.id],
                 comments_fingerprint=comments_fingerprints.get(conv.id),
                 child_db_statuses=child_db_statuses,
             )

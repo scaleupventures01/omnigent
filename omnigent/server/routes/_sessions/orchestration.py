@@ -802,9 +802,9 @@ def _build_session_list_item(
         wired; gates owner/level population to mirror ``list_sessions``.
     :param pending_count: Number of outstanding elicitations for this
         conversation, from ``pending_elicitations.counts_for()``.
-    :param child_session_ids: Direct sub-agent children for this
-        conversation, as returned by
-        ``conversation_store.list_child_conversation_ids_by_parent()``.
+    :param child_session_ids: All sub-agent descendants of this
+        conversation, at any depth (child, grandchild, and so on), as
+        returned by ``_collect_descendant_conversation_ids_by_root()``.
     :param comments_fingerprint: Change-detection summary of this
         conversation's review comments, from
         ``comment_store.get_comments_fingerprints()[conv.id]``. ``None``
@@ -812,9 +812,9 @@ def _build_session_list_item(
         wired — emitted as ``comments_count=0`` /
         ``comments_updated_at=None`` so the two states look identical
         on the wire.
-    :param child_db_statuses: Persisted ``live_status`` by child
+    :param child_db_statuses: Persisted ``live_status`` by descendant
         conversation id, batch-fetched once for the whole page by the
-        caller. Lets the status rollup cover children whose runner
+        caller. Lets the status rollup cover descendants whose runner
         tunnel lives on another replica (no local cache entry).
     :returns: The assembled :class:`SessionListItem`.
     """

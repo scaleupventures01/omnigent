@@ -1180,16 +1180,16 @@ def _session_status_with_child_rollup(
     child_db_statuses: Mapping[str, str | None] | None = None,
 ) -> Literal["idle", "running", "failed"]:
     """
-    Map a session's cached status plus direct child activity to list status.
+    Map a session's cached status plus child activity to list status.
 
     A parent session should read as ``"running"`` in the sidebar while any
-    direct sub-agent child is still ``"running"`` or ``"waiting"``, even if
+    sub-agent child is still ``"running"`` or ``"waiting"``, even if
     the parent runner has already gone idle. This keeps every sidebar row
     honest without mounting a child-session query for each row.
 
     :param conversation_id: Parent session/conversation identifier,
         e.g. ``"conv_parent123"``.
-    :param child_session_ids: Direct sub-agent child conversation ids,
+    :param child_session_ids: Sub-agent child conversation ids,
         e.g. ``["conv_child1", "conv_child2"]``.
     :param db_status: The row's persisted ``live_status``, used when the
         local cache has no entry (this replica doesn't hold the runner
@@ -1250,6 +1250,49 @@ async def _collect_descendant_conversation_ids(
                     next_frontier.append(child_id)
         frontier = next_frontier
     return descendant_ids
+
+
+async def _collect_descendant_conversation_ids_by_root(
+    conversation_store: ConversationStore,
+    root_ids: list[str],
+) -> dict[str, list[str]]:
+    """
+    Batch counterpart to :func:`_collect_descendant_conversation_ids`: walk
+    every root's sub-agent tree at once.
+
+    Each tree LEVEL is one ``list_child_conversation_ids_by_parent`` call
+    covering every root's frontier together, so a page of N rows costs as
+    many queries as the deepest tree among them (not N times that).
+
+    :param conversation_store: Store for child-id lookup.
+    :param root_ids: Root session/conversation identifiers,
+        e.g. ``["conv_a", "conv_b"]``. Duplicates are tolerated.
+    :returns: Mapping of each root id to its descendant ids (child,
+        grandchild, and so on) in breadth-first order. Roots with no
+        sub-agent descendants map to an empty list.
+    """
+    descendants_by_root: dict[str, list[str]] = {root_id: [] for root_id in root_ids}
+    root_of: dict[str, str] = dict.fromkeys(root_ids)
+    for root_id in root_ids:
+        root_of[root_id] = root_id
+    seen = set(root_ids)
+    frontier = list(descendants_by_root.keys())
+    while frontier:
+        child_ids_map = await asyncio.to_thread(
+            conversation_store.list_child_conversation_ids_by_parent,
+            frontier,
+        )
+        next_frontier: list[str] = []
+        for parent_id in frontier:
+            parent_root = root_of[parent_id]
+            for child_id in child_ids_map.get(parent_id, []):
+                if child_id not in seen:
+                    seen.add(child_id)
+                    root_of[child_id] = parent_root
+                    descendants_by_root[parent_root].append(child_id)
+                    next_frontier.append(child_id)
+        frontier = next_frontier
+    return descendants_by_root
 
 
 @dataclass(frozen=True)
@@ -9452,6 +9495,7 @@ __all__ = [
     "_codex_subagent_labels_from_body",
     "_coerce_cumulative_field",
     "_collect_descendant_conversation_ids",
+    "_collect_descendant_conversation_ids_by_root",
     "_compact_lock",
     "_consume_pre_resolved_harness_elicitation",
     "_create_and_publish_antigravity_child",

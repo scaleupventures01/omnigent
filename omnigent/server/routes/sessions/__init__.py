@@ -369,6 +369,7 @@ from omnigent.server.routes._sessions.helpers import (
     _codex_subagent_labels_from_body as _codex_subagent_labels_from_body,
     _coerce_cumulative_field as _coerce_cumulative_field,
     _collect_descendant_conversation_ids as _collect_descendant_conversation_ids,
+    _collect_descendant_conversation_ids_by_root as _collect_descendant_conversation_ids_by_root,
     _consume_pre_resolved_harness_elicitation as _consume_pre_resolved_harness_elicitation,
     _create_and_publish_codex_child as _create_and_publish_codex_child,
     _create_session_worktree as _create_session_worktree,
