@@ -1177,6 +1177,7 @@ def _session_status_with_child_rollup(
     conversation_id: str,
     child_session_ids: list[str],
     db_status: str | None = None,
+    child_db_statuses: Mapping[str, str | None] | None = None,
 ) -> Literal["idle", "running", "failed"]:
     """
     Map a session's cached status plus direct child activity to list status.
@@ -1192,8 +1193,11 @@ def _session_status_with_child_rollup(
         e.g. ``["conv_child1", "conv_child2"]``.
     :param db_status: The row's persisted ``live_status``, used when the
         local cache has no entry (this replica doesn't hold the runner
-        tunnel). The child rollup below stays cache-only — a wrong-pod
-        miss there just skips the parent's roll-up spinner, best-effort.
+        tunnel).
+    :param child_db_statuses: Persisted ``live_status`` by child id,
+        batch-fetched once by the caller. A child with no local cache
+        entry (its runner tunnel lives on another replica) falls back to
+        this value, mirroring :func:`_session_status_from_cache`.
     :returns: One of ``"idle"``, ``"running"``, ``"failed"`` for the
         session-list row.
     """
@@ -1205,7 +1209,8 @@ def _session_status_with_child_rollup(
     # the next ``Stop`` hook, so a spinner keyed off it can outlive the shells.
     # The in-chat indicator still reports them from the count.
     if any(
-        _session_status_cache.get(child_id) in ("running", "waiting")
+        _session_status_from_cache(child_id, (child_db_statuses or {}).get(child_id))
+        == "running"
         for child_id in child_session_ids
     ):
         return "running"

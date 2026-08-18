@@ -770,6 +770,7 @@ def _build_session_list_item(
     pending_count: int,
     child_session_ids: list[str],
     comments_fingerprint: CommentsFingerprint | None,
+    child_db_statuses: Mapping[str, str | None] | None = None,
 ) -> SessionListItem:
     """
     Assemble one :class:`SessionListItem` from a conversation row and
@@ -811,6 +812,10 @@ def _build_session_list_item(
         wired — emitted as ``comments_count=0`` /
         ``comments_updated_at=None`` so the two states look identical
         on the wire.
+    :param child_db_statuses: Persisted ``live_status`` by child
+        conversation id, batch-fetched once for the whole page by the
+        caller. Lets the status rollup cover children whose runner
+        tunnel lives on another replica (no local cache entry).
     :returns: The assembled :class:`SessionListItem`.
     """
     # ``conv.agent_id`` is guaranteed non-None by the caller (sessions
@@ -826,7 +831,9 @@ def _build_session_list_item(
         id=conv.id,
         agent_id=conv.agent_id,
         agent_name=agent_names_by_id.get(conv.agent_id),
-        status=_session_status_with_child_rollup(conv.id, child_session_ids, conv.live_status),
+        status=_session_status_with_child_rollup(
+            conv.id, child_session_ids, conv.live_status, child_db_statuses
+        ),
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         title=title_without_closed_marker(conv.title),

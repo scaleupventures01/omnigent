@@ -965,6 +965,13 @@ def register_core_routes(
         # the index's lock per row but otherwise has no DB cost.
         pending_counts = pending_elicitations.counts_for(conv_ids)
         comments_fingerprints = await _comments_fingerprints_for(conv_ids)
+        # One SELECT for the whole page — the status rollup's fallback for
+        # children whose runner tunnel lives on another replica (no local
+        # cache entry).
+        all_child_ids = list({cid for ids in child_ids_by_parent.values() for cid in ids})
+        child_db_statuses = await asyncio.to_thread(
+            conversation_store.get_session_live_statuses, all_child_ids
+        )
         items: list[SessionListItem] = [
             _build_session_list_item(
                 conv,
@@ -976,6 +983,7 @@ def register_core_routes(
                 pending_count=pending_counts.get(conv.id, 0),
                 child_session_ids=child_ids_by_parent[conv.id],
                 comments_fingerprint=comments_fingerprints.get(conv.id),
+                child_db_statuses=child_db_statuses,
             )
             for conv in page.data
             if conv.agent_id is not None
@@ -1095,6 +1103,10 @@ def register_core_routes(
             _comments_fingerprints_for(conv_ids),
         )
         pending_counts = pending_elicitations.counts_for(conv_ids)
+        all_child_ids = list({cid for ids in child_ids_by_parent.values() for cid in ids})
+        child_db_statuses = await asyncio.to_thread(
+            conversation_store.get_session_live_statuses, all_child_ids
+        )
         items = [
             _build_session_list_item(
                 conv,
@@ -1106,6 +1118,7 @@ def register_core_routes(
                 pending_count=pending_counts.get(conv.id, 0),
                 child_session_ids=child_ids_by_parent[conv.id],
                 comments_fingerprint=comments_fingerprints.get(conv.id),
+                child_db_statuses=child_db_statuses,
             )
             for conv in convs
         ]

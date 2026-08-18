@@ -1216,6 +1216,31 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def get_session_live_statuses(
+        self, conversation_ids: list[str]
+    ) -> dict[str, str | None]:
+        """
+        Return the persisted ``live_status`` for a batch of sessions.
+
+        Bulk read counterpart to :meth:`set_session_live_status`, for
+        callers rolling sub-agent activity into parent session rows: the
+        relay-fed status cache only covers sessions whose runner tunnel
+        this replica holds, so a wrong-pod child's rollup needs the row
+        value the tunnel-holding replica persisted. One ``SELECT`` over
+        the metadata table.
+
+        :param conversation_ids: Session/conversation ids to look up,
+            e.g. ``["conv_abc123", "conv_def456"]``. Duplicates are
+            tolerated. Empty input returns an empty map without touching
+            the database.
+        :returns: Mapping ``{conversation_id: live_status}`` where the
+            value is one of ``enum_codecs.SESSION_LIVE_STATUS`` or
+            ``None`` when the row carries no status. Ids with no
+            metadata row are absent.
+        """
+        ...
+
+    @abstractmethod
     def set_session_live_status(self, conversation_id: str, status: str) -> None:
         """
         Persist the relay-observed turn status for one session.

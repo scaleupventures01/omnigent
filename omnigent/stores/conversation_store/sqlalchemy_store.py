@@ -2922,6 +2922,37 @@ class SqlAlchemyConversationStore(ConversationStore):
                 .values(runner_last_seen=None)
             )
 
+    def get_session_live_statuses(
+        self, conversation_ids: list[str]
+    ) -> dict[str, str | None]:
+        """
+        Return the persisted ``live_status`` for a batch of sessions.
+
+        Bulk read counterpart to :meth:`set_session_live_status`; one
+        ``SELECT`` over ``omnigent_conversation_metadata``. See the
+        abstract method.
+
+        :param conversation_ids: Session/conversation ids to look up.
+        :returns: Mapping of id to decoded live status (``None`` when
+            the row carries none); ids with no metadata row are absent.
+        """
+        unique_ids = list(dict.fromkeys(conversation_ids))
+        if not unique_ids:
+            return {}
+        with self._session("get_session_live_statuses") as session:
+            rows = session.execute(
+                select(
+                    SqlConversationMetadata.id, SqlConversationMetadata.live_status
+                ).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id.in_(unique_ids),
+                )
+            ).all()
+        return {
+            conv_id: decode_session_live_status(raw) if raw is not None else None
+            for conv_id, raw in rows
+        }
+
     def set_session_live_status(self, conversation_id: str, status: str) -> None:
         """
         Persist the relay-observed turn status for one session.
