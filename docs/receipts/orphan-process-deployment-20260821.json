@@ -1,0 +1,193 @@
+{
+  "receipt_version": 1,
+  "run_id": "orphan-process-deployment-20260821",
+  "repository": "scaleupventures01/omnigent",
+  "completed_at": "2026-08-21T17:46:30Z",
+  "integration": {
+    "source_branch": "fix/orphan-process-ownership-main",
+    "implementation_sha": "6c249a0f8d0bf7c395160f57cfccc02be7c6a79e",
+    "pull_request": "https://github.com/scaleupventures01/omnigent/pull/1",
+    "target_branch": "main",
+    "merge_sha": "65122558c8962b4e19aad983836ca8c0ae65e210",
+    "status": "merged"
+  },
+  "pre_deployment": {
+    "timestamp": "2026-08-21T17:15:48Z",
+    "version": "omnigent 0.10.0.dev0 (84d1753c, built 2026-08-21T15:29:48Z)",
+    "server_process": {
+      "pid": 98564,
+      "create_time": 1787324816.975116,
+      "port": 6767
+    }
+  },
+  "deployment": {
+    "environment": "existing local Omnigent environment on Calvin-MBP-M1-Max.local",
+    "command": "PATH=/tmp/omnigent-node22-bin:/Users/calvinwilliamsjr/.volta/tools/image/node/22.15.0/bin:$PATH ./scripts/install_oss.sh --non-interactive --verbose --repo https://github.com/scaleupventures01/omnigent.git@65122558c8962b4e19aad983836ca8c0ae65e210",
+    "exit_code": 0,
+    "installed_version": "omnigent 0.10.0.dev0 (65122558, built 2026-08-21T17:17:26Z)",
+    "installed_commit_sha": "65122558c8962b4e19aad983836ca8c0ae65e210",
+    "service_identifier": "gui/501/ai.omnigent.local-server",
+    "service_command": "/Users/calvinwilliamsjr/.local/share/uv/tools/omnigent/bin/omnigent server",
+    "service_pid": 75943,
+    "service_create_time": 1787333058.214964,
+    "service_started_at": "2026-08-21T17:24:18.214964Z",
+    "health_url": "http://127.0.0.1:6767/health",
+    "health_result": {
+      "status_code": 200,
+      "body": {
+        "status": "ok"
+      }
+    },
+    "install_log_sha256": "dd0b3ae7581d504ef9ae6d3451b67b9e42704345099b216e27104efa3c78d1ba",
+    "installed_file_verification": "isolated python -I import reported the merge SHA and all six changed installed files matched git show origin/main byte-for-byte"
+  },
+  "tests": {
+    "focused_and_affected": {
+      "command": "uv run pytest -q tests/inner/test_proc_and_platform.py tests/inner/test_terminal.py tests/runtime/harnesses/test_process_manager.py tests/host/test_connect.py tests/host/test_runner_zygote.py tests/runner/test_runner_entry.py tests/runner/test_zygote.py",
+      "exit_code": 0,
+      "result": "314 passed, 8 skipped, 63 warnings in 34.86s",
+      "log_sha256": "3100ecbddd33f278084cfcf3ddaf100e4416b1b9a615201bbe594e10e11fea57"
+    },
+    "terminal_integration": {
+      "exit_code": 0,
+      "result": "5 passed",
+      "log_sha256": "8aa6cd01bc625f98c1588a82878fecbeb317c4690021454a8f8372176d0efdbf"
+    },
+    "pre_commit": {
+      "command": "pre-commit run --all-files",
+      "exit_code": 0,
+      "result": "all hooks passed, including Ruff, Pyrefly, repository diff checks, web/frontend, ktlint, Swift, and protobuf checks",
+      "log_sha256": "4fd43a6168305a59c69238408b8523ed4497f17f5291b0b38e0b9ef46a2e49b0"
+    },
+    "broad_suite": {
+      "command": "uv run pytest -p no:faulthandler",
+      "exit_code": 1,
+      "result": "20473 passed, 96 skipped, 7 xfailed, 36 failed, 408 warnings, 3 subtests passed, 2 rerun in 1092.05s",
+      "log_sha256": "c7f60b8cbf06d11b6a3fbd08de2ab6defac114750f6abd74e11677237c3903ce",
+      "baseline_replay": {
+        "result": "the exact 36 failures replayed on untouched baseline as 28 failed and 8 passed",
+        "log_sha256": "297b05a2f5eb04f35fe7a8eb2b95ff1d4ae510aa0c6e0ff5cfd7982b8657bb43"
+      },
+      "feature_isolation": {
+        "result": "the 8 baseline-pass failures were untouched Docker entrypoint tests and passed 8/8 when rerun isolated on the feature tree",
+        "log_sha256": "73712200b1bb321f342345d7ed02f98839389d245bf78bf3af58b5eef9db8eee"
+      },
+      "baseline_categories": [
+        "Linux-only behavior on macOS",
+        "missing psycopg dependency",
+        "environment-dependent ANSI/color and installed qwen behavior",
+        "global skill/tool-manager state",
+        "websocket bridge timeout"
+      ],
+      "new_consistent_regressions": 0
+    }
+  },
+  "post_deployment_runtime": {
+    "command": "/Users/calvinwilliamsjr/.local/share/uv/tools/omnigent/bin/python -I runtime_verify_installed.py",
+    "exit_code": 0,
+    "package_sha": "65122558c8962b4e19aad983836ca8c0ae65e210",
+    "result": "8 passed, 0 failed",
+    "log_sha256": "88c27c9fe6d10233fcb047fa6b998c13cb3916af7accf4efedef0eeb7e8cb7ff",
+    "checks": [
+      {
+        "name": "normal terminal launch and close",
+        "pane_pid": 60268,
+        "passed": true
+      },
+      {
+        "name": "detached TERM-resistant descendant exits and unrelated sibling survives",
+        "owned_pid": 60289,
+        "sibling_pid": 60295,
+        "passed": true
+      },
+      {
+        "name": "PID/create-time mismatch skips unrelated process",
+        "pid": 60356,
+        "actual_create_time": 1787333588.595309,
+        "stale_create_time": 0.0,
+        "passed": true
+      },
+      {
+        "name": "startup reconciliation reaps abandoned terminal ownership record",
+        "dead_owner_pid": 60364,
+        "abandoned_pid": 60383,
+        "passed": true
+      },
+      {
+        "name": "direct harness stop reaps detached descendant",
+        "harness_pid": 60552,
+        "detached_pid": 60554,
+        "passed": true
+      },
+      {
+        "name": "host zygote stop reaps runner and preserves sibling",
+        "zygote_pid": 60614,
+        "runner_pid": 60706,
+        "sibling_pid": 60612,
+        "passed": true
+      },
+      {
+        "name": "runner disconnect uses bounded TERM-to-KILL escalation and preserves sibling",
+        "owned_pid": 60711,
+        "sibling_pid": 60712,
+        "passed": true
+      }
+    ]
+  },
+  "verified_test_daemon_cleanup": {
+    "reason": "three parentless local E2E daemons from the broad-suite window were running from wt-gemini-antigravity with pytest-21 temporary databases and repeatedly spawning CLI version probes",
+    "root_identities": [
+      {
+        "pid": 83679,
+        "create_time": 1787325602.938407
+      },
+      {
+        "pid": 84713,
+        "create_time": 1787325625.441062
+      },
+      {
+        "pid": 85303,
+        "create_time": 1787325640.584005
+      }
+    ],
+    "method": "snapshot each exact process tree and call teardown_identities with PID/create-time verification; no broad pkill or command-name cleanup",
+    "terminated_count": 9,
+    "killed_count": 0,
+    "survivor_count": 0,
+    "skipped_mismatch_count": 0,
+    "cleanup_log_sha256": [
+      "6a2e368fc89470c7b1d2c89d165bbb8e5d7e6ad87dae25a74d235c089ed94458",
+      "91de4eeea427846cc5544efbd0924dd51f63009366b72c833b1c2757294f7ebe"
+    ]
+  },
+  "three_minute_census": {
+    "quiet_period_start": "2026-08-21T17:43:11Z",
+    "quiet_period_end": "2026-08-21T17:46:12Z",
+    "health_samples": 6,
+    "health_failures": 0,
+    "owned_orphan_processes": 0,
+    "fixture_processes": 0,
+    "runtime_test_processes": 0,
+    "runtime_test_cpu_percent": 0.0,
+    "unrelated_sibling_failures": 0,
+    "verified_test_daemon_roots_remaining": 0,
+    "census_sha256": "fec4f41a5635ee34f8f74150649bd0af67916f4cca0b1043fd6c3bfaac4815b4",
+    "monitor_log_sha256": "66da6ef0bd9ea422c6a3118f05ddac2efd5d09bb208b114fa60c7eb14c872eb9",
+    "legacy_terminal_note": "25 pre-fix terminal directories lack ownership.json; every one has a live owner PID and live tmux pane, so fail-closed policy preserved them and none was classified or signaled as an orphan"
+  },
+  "rollback": {
+    "artifact": "/Users/calvinwilliamsjr/Domains/infra/omnigent-wt/wt-gemini-antigravity/dist/omnigent-0.10.0.dev0-py3-none-any.whl",
+    "artifact_sha256": "5174f010c7fca864bc8b57317b40b7e768735e35ce2849f3c129d09519378872",
+    "command": "uv tool install --force --python 3.12 /Users/calvinwilliamsjr/Domains/infra/omnigent-wt/wt-gemini-antigravity/dist/omnigent-0.10.0.dev0-py3-none-any.whl && launchctl kickstart -k gui/501/ai.omnigent.local-server"
+  },
+  "preservation": {
+    "dirty_checkout": "/Users/calvinwilliamsjr/Domains/infra/omnigent",
+    "tracked_diff_sha256": "9818570d32d6b4d341f42df8a84e32cbcd2287563c101325c16bdb9961c1ed87",
+    "untracked_content_sha256": "612a089e8423a43021b576fc12c3b3096b79bef7e32ee330b17256e71cf6f2ee",
+    "result": "unrelated dirty work was not reset, stashed, reformatted, or included"
+  },
+  "residual_risks": [
+    "Existing active pre-deployment desktop-host sessions remain live to preserve user work; newly spawned runners load the installed merge SHA, while those legacy live terminal directories remain fail-closed until their owning sessions end.",
+    "The broad suite retains 28 evidenced baseline failures and required disabling pytest's faulthandler plugin to avoid a known teardown deadlock."
+  ]
+}
