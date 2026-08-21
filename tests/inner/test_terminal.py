@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 import omnigent.inner.terminal as terminal_mod
@@ -424,6 +431,80 @@ async def test_server_survives_inner_process_exit_real_tmux(tmp_path: Path) -> N
         )
     finally:
         await instance.close()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="requires a real tmux binary")
+@pytest.mark.asyncio
+async def test_close_reaps_owned_detached_grandchild_and_spares_sibling(
+    tmp_path: Path,
+) -> None:
+    """Closing one terminal reaps its detached descendant, but not a sibling."""
+    short_root = Path(tempfile.mkdtemp(prefix="omni-term-tree-"))
+    owner_dir = short_root / "owner"
+    sibling_dir = short_root / "sibling"
+    owner_dir.mkdir()
+    sibling_dir.mkdir()
+    owned_pid_file = short_root / "owned.pid"
+    child_code = "\n".join(
+        (
+            "import os, pathlib, signal, time",
+            "os.setsid()",
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN)",
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            f"pathlib.Path({str(owned_pid_file)!r}).write_text(str(os.getpid()))",
+            "time.sleep(120)",
+        )
+    )
+    owner_script = f"{shlex.quote(sys.executable)} -c {shlex.quote(child_code)} & wait"
+    owner = TerminalInstance(
+        name="owner",
+        session_key="owner",
+        socket_path=owner_dir / "tmux.sock",
+        private_dir=owner_dir,
+        command="sh",
+        args=["-c", owner_script],
+    )
+    sibling = TerminalInstance(
+        name="sibling",
+        session_key="sibling",
+        socket_path=sibling_dir / "tmux.sock",
+        private_dir=sibling_dir,
+        command="sleep",
+        args=["120"],
+    )
+    owned_pid: int | None = None
+    try:
+        await owner.launch(cwd=tmp_path)
+        await sibling.launch(cwd=tmp_path)
+        ownership = terminal_mod._read_ownership_record(
+            owner_dir / terminal_mod._OWNERSHIP_FILENAME
+        )
+        assert ownership is not None
+        assert terminal_mod._proc.identity_matches(ownership.owner)
+        assert owner.pane_pid_sync() in {identity.pid for identity in ownership.processes}
+        for _ in range(250):
+            if owned_pid_file.exists():
+                owned_pid = int(owned_pid_file.read_text())
+                break
+            await asyncio.sleep(0.02)
+        else:  # pragma: no cover - only on a launch hang
+            raise AssertionError("owned grandchild never published its PID")
+
+        await owner.close()
+
+        assert await sibling.is_alive() is True
+        assert not psutil.pid_exists(owned_pid), (
+            f"owned detached grandchild {owned_pid} survived terminal close"
+        )
+    finally:
+        await owner.close()
+        await sibling.close()
+        if owned_pid is not None and psutil.pid_exists(owned_pid):
+            with psutil.Process(owned_pid).oneshot():
+                os.kill(owned_pid, signal.SIGKILL)
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.TimeoutExpired):
+                psutil.Process(owned_pid).wait(timeout=5)
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
 async def _capture_launch_argv(
@@ -1205,6 +1286,30 @@ def _write_instance_dir(root: Path, name: str, owner_pid: int | None) -> Path:
     return instance_dir
 
 
+def test_terminal_ownership_record_round_trip(tmp_path: Path) -> None:
+    """Ownership metadata persists owner and tree identities in typed JSON."""
+    record = terminal_mod._TerminalOwnershipRecord(
+        owner=terminal_mod._proc.ProcessIdentity(pid=123, create_time=10.5),
+        processes=(
+            terminal_mod._proc.ProcessIdentity(pid=456, create_time=20.5),
+            terminal_mod._proc.ProcessIdentity(pid=789, create_time=30.5),
+        ),
+    )
+    path = tmp_path / "ownership.json"
+
+    terminal_mod._write_ownership_record(path, record)
+
+    assert terminal_mod._read_ownership_record(path) == record
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "owner": {"pid": 123, "create_time": 10.5},
+        "processes": [
+            {"pid": 456, "create_time": 20.5},
+            {"pid": 789, "create_time": 30.5},
+        ],
+    }
+
+
 def _dead_pid() -> int:
     """
     Return the pid of a real process that has already exited.
@@ -1268,6 +1373,86 @@ def test_reap_orphaned_terminals_reaps_only_dead_owner_dirs(
     assert not dead_dir.exists()
     assert live_dir.exists()
     assert unmarked_dir.exists()
+
+
+def test_reap_orphaned_terminal_uses_identity_and_refreshes_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale owner identity triggers a refreshed, verified tree teardown."""
+    instance_dir = _write_instance_dir(tmp_path, "omnigent-terminal-reused", os.getpid())
+    socket_path = instance_dir / "tmux.sock"
+    socket_path.touch()
+    stale_owner = terminal_mod._proc.ProcessIdentity(pid=os.getpid(), create_time=0.0)
+    persisted = terminal_mod._proc.ProcessIdentity(pid=2222, create_time=2.0)
+    refreshed = terminal_mod._proc.ProcessIdentity(pid=3333, create_time=3.0)
+    terminal_mod._write_ownership_record(
+        instance_dir / terminal_mod._OWNERSHIP_FILENAME,
+        terminal_mod._TerminalOwnershipRecord(
+            owner=stale_owner,
+            processes=(persisted,),
+        ),
+    )
+    teardown_calls: list[tuple[terminal_mod._proc.ProcessIdentity, ...]] = []
+    kill_calls: list[list[str]] = []
+
+    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
+    monkeypatch.setattr(terminal_mod._proc, "identity_matches", lambda identity: False)
+    monkeypatch.setattr(
+        terminal_mod,
+        "_snapshot_terminal_processes",
+        lambda socket: (refreshed,),
+    )
+    monkeypatch.setattr(
+        terminal_mod._proc,
+        "teardown_identities",
+        lambda identities, grace: (
+            teardown_calls.append(tuple(identities))
+            or terminal_mod._proc.TeardownOutcome(terminated=tuple(identities))
+        ),
+    )
+
+    def _record_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        kill_calls.append(list(argv))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(
+        terminal_mod,
+        "subprocess",
+        SimpleNamespace(run=_record_run, TimeoutExpired=TimeoutError),
+    )
+
+    assert terminal_mod.reap_orphaned_terminals() == 1
+    assert teardown_calls == [(persisted, refreshed)]
+    assert kill_calls == [["tmux", "-S", str(socket_path), "kill-server"]]
+    assert not instance_dir.exists()
+
+
+def test_reap_orphaned_terminal_preserves_matching_live_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live owner with matching creation time is never reconciled."""
+    instance_dir = _write_instance_dir(tmp_path, "omnigent-terminal-live2", os.getpid())
+    owner = terminal_mod._proc.process_identity(os.getpid())
+    assert owner is not None
+    terminal_mod._write_ownership_record(
+        instance_dir / terminal_mod._OWNERSHIP_FILENAME,
+        terminal_mod._TerminalOwnershipRecord(owner=owner),
+    )
+    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
+    monkeypatch.setattr(
+        terminal_mod._proc,
+        "teardown_identities",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not reap a live owner")
+        ),
+    )
+
+    assert terminal_mod.reap_orphaned_terminals() == 0
+    assert instance_dir.exists()
 
 
 def test_reap_orphaned_terminals_kills_server_for_dead_owner_socket(

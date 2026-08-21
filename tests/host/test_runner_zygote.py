@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -21,12 +22,14 @@ from pathlib import Path
 import pytest
 
 import omnigent
+import omnigent.host.runner_zygote as runner_zygote_mod
 from omnigent.host.runner_zygote import (
     _ZYGOTE_LOST_EXIT_CODE,
     ZygoteManager,
     ZygoteRunnerProc,
     ZygoteUnavailable,
 )
+from omnigent.inner import _proc
 from omnigent.runner import _zygote
 from omnigent.runner._zygote import (
     _ZYGOTE_TEST_CHILD_EXIT_ENV_VAR,
@@ -38,6 +41,49 @@ from omnigent.runner._zygote import (
 # The zygote is POSIX-only: these tests exercise os.fork() and pass_fds, which
 # do not exist on Windows.
 pytestmark = pytest.mark.posix_only
+
+
+def test_dropped_runner_terminates_only_its_owned_harnesses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner disconnect starts bounded TERM/KILL cleanup for owned siblings."""
+    server = object.__new__(_ZygoteServer)
+    server._live = {2001, 2002}
+    server._exit_codes = {}
+    server._orphaned = set()
+    server._orphan_deadlines = {}
+    server._runner_harness_pids = {7: {2001}}
+    signals: list[tuple[int, int]] = []
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    server._orphan_harnesses(7)
+
+    assert signals == [(2001, signal.SIGTERM)]
+    assert 2002 not in server._orphaned
+    now[0] += 10.0
+    server._escalate_orphans()
+    assert signals[-1] == (2001, signal.SIGKILL)
+    assert all(pid != 2002 for pid, _sig in signals)
+
+
+def test_zygote_spawn_uses_process_group_containment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The zygote and all forked children live in an isolated process group."""
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def _fake_popen(argv: list[str], **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(runner_zygote_mod.subprocess, "Popen", _fake_popen)
+
+    assert ZygoteManager()._spawn_zygote_process(99) is sentinel
+    for key, value in _proc.spawn_kwargs().items():
+        assert captured[key] == value
 
 
 def _fork_env(exit_code: int) -> dict[str, str]:
@@ -187,22 +233,20 @@ def test_signal_of_exited_runner_is_a_safe_noop(manager: ZygoteManager, tmp_path
     proc.kill()
 
 
-def test_poll_after_stop_reports_live_runner_as_none(manager: ZygoteManager, tmp_path) -> None:
-    """A still-live runner polls as None once the zygote is stopped.
+def test_stop_reaps_live_runner_tree(manager: ZygoteManager, tmp_path) -> None:
+    """Stopping the zygote synchronously reaps its still-live runner tree.
 
-    With the control socket gone the manager can't learn the exit code, so it
-    probes the pid: a still-live runner reports None (the runner's own orphan
-    watchdog handles teardown) rather than a bogus exit or a crash.
+    The exit code is unrecoverable once the zygote exits, so the handle reports
+    the established lost-zygote sentinel; critically, it cannot stay alive and
+    depend only on the asynchronous parent-death watchdog.
 
     :param manager: The started manager fixture.
     :param tmp_path: Temp dir for the child's log.
     """
     proc = manager.fork_runner(_sleep_env(30), str(tmp_path / "runner.log"), str(tmp_path))
     manager.stop()
-    try:
-        assert proc.poll() is None  # pid still alive -> honestly "still live"
-    finally:
-        proc.kill()
+    assert proc.poll() == _ZYGOTE_LOST_EXIT_CODE
+    assert not _proc.process_alive(proc.pid)
 
 
 def test_fork_after_stop_raises_unavailable(manager: ZygoteManager, tmp_path) -> None:

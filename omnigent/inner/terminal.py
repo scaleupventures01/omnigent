@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -194,12 +195,77 @@ _TMUX_START_ON_ATTACH_CHANNEL = "omnigent-start-on-attach"
 # (``reap_orphaned_terminals``).
 _TERMINAL_DIR_PREFIX = "omnigent-terminal-"
 _OWNER_PID_FILENAME = "owner.pid"
+_OWNERSHIP_FILENAME = "ownership.json"
 # Bound for each ``tmux kill-server`` in the orphan sweep; a wedged
 # tmux must not stall runner startup.
 _REAP_KILL_TIMEOUT_S = 10.0
+_TERMINAL_TEARDOWN_GRACE_S = 0.5
 # Literal tmux empty option value. Passing this as an argv value clears
 # status segments and window formats; it is not an application sentinel.
 _TMUX_EMPTY_OPTION_VALUE = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalOwnershipRecord:
+    """Stable identities for a terminal owner and its managed process tree."""
+
+    owner: _proc.ProcessIdentity
+    processes: tuple[_proc.ProcessIdentity, ...] = ()
+    version: int = 1
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the versioned JSON representation persisted beside the socket."""
+        return {
+            "version": self.version,
+            "owner": self.owner.to_dict(),
+            "processes": [identity.to_dict() for identity in self.processes],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> _TerminalOwnershipRecord:
+        """Parse and validate a version-one ownership record."""
+        if value.get("version") != 1:
+            raise ValueError("unsupported terminal ownership record version")
+        owner = value.get("owner")
+        processes = value.get("processes")
+        if not isinstance(owner, dict) or not isinstance(processes, list):
+            raise ValueError("invalid terminal ownership record")
+        return cls(
+            owner=_proc.ProcessIdentity.from_dict(owner),
+            processes=tuple(
+                _proc.ProcessIdentity.from_dict(item)
+                for item in processes
+                if isinstance(item, dict)
+            ),
+        )
+
+
+def _write_ownership_record(path: Path, record: _TerminalOwnershipRecord) -> None:
+    """Atomically persist a terminal ownership record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as handle:
+        json.dump(record.to_dict(), handle, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    os.replace(temporary, path)
+
+
+def _read_ownership_record(path: Path) -> _TerminalOwnershipRecord | None:
+    """Read an ownership record, treating missing or malformed data as unknown."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return None
+        return _TerminalOwnershipRecord.from_dict(value)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def _tmux_command_sequence(commands: list[list[str]]) -> list[str]:
@@ -763,6 +829,45 @@ def _terminals_tmp_root() -> Path:
     return Path(tempfile.gettempdir())
 
 
+def _snapshot_terminal_processes(
+    socket_path: Path,
+) -> tuple[_proc.ProcessIdentity, ...]:
+    """Capture every live pane tree behind a private tmux server."""
+    if not socket_path.exists():
+        return ()
+    try:
+        result = subprocess.run(
+            [
+                "tmux",
+                "-S",
+                str(socket_path),
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_pid}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_REAP_KILL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    identities: list[_proc.ProcessIdentity] = []
+    seen: set[tuple[int, float]] = set()
+    for value in result.stdout.split():
+        try:
+            pane_pid = int(value)
+        except ValueError:
+            continue
+        for identity in _proc.snapshot_tree(pane_pid):
+            key = (identity.pid, identity.create_time)
+            if key not in seen:
+                seen.add(key)
+                identities.append(identity)
+    return tuple(identities)
+
+
 def reap_orphaned_terminals() -> int:
     """
     Kill terminal tmux servers whose owning process is gone.
@@ -788,9 +893,22 @@ def reap_orphaned_terminals() -> int:
             pid = int((entry / _OWNER_PID_FILENAME).read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             continue
-        if _process_alive(pid):
+        ownership = _read_ownership_record(entry / _OWNERSHIP_FILENAME)
+        owner_alive = (
+            _proc.identity_matches(ownership.owner)
+            if ownership is not None
+            else _process_alive(pid)
+        )
+        if owner_alive:
             continue
         socket_path = entry / "tmux.sock"
+        processes: list[_proc.ProcessIdentity] = []
+        if ownership is not None:
+            processes.extend(ownership.processes)
+            processes.extend(_snapshot_terminal_processes(socket_path))
+            processes = list(
+                {(identity.pid, identity.create_time): identity for identity in processes}.values()
+            )
         if socket_path.exists():
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 subprocess.run(
@@ -801,6 +919,18 @@ def reap_orphaned_terminals() -> int:
                     capture_output=True,
                     timeout=_REAP_KILL_TIMEOUT_S,
                 )
+        if processes:
+            outcome = _proc.teardown_identities(
+                processes,
+                grace=_TERMINAL_TEARDOWN_GRACE_S,
+            )
+            if outcome.survivors:
+                logger.error(
+                    "orphan terminal reconciliation left survivors dir=%s pids=%s",
+                    entry,
+                    [identity.pid for identity in outcome.survivors],
+                )
+                continue
         shutil.rmtree(entry, ignore_errors=True)
         reaped += 1
     return reaped
@@ -1253,6 +1383,7 @@ class TerminalInstance:
 
         self.running = True
         self.launch_cwd = effective_cwd
+        self._refresh_ownership_record()
 
     async def send(
         self,
@@ -1403,10 +1534,28 @@ class TerminalInstance:
         await self._stop_idle_watcher()
         self._stop_idle_watcher_thread()
 
+        ownership = self._refresh_ownership_record() if self.running else None
         if self.running:
             with contextlib.suppress(RuntimeError):
                 await self._tmux("kill-server")
             self.running = False
+        if ownership is not None and ownership.processes:
+            outcome = await asyncio.to_thread(
+                _proc.teardown_identities,
+                ownership.processes,
+                grace=_TERMINAL_TEARDOWN_GRACE_S,
+            )
+            log = logger.error if outcome.survivors else logger.info
+            log(
+                "terminal process teardown name=%s session=%s terminated=%s "
+                "killed=%s survivors=%s skipped_mismatch=%s",
+                self.name,
+                self.session_key,
+                [item.pid for item in outcome.terminated],
+                [item.pid for item in outcome.killed],
+                [item.pid for item in outcome.survivors],
+                [item.pid for item in outcome.skipped_mismatch],
+            )
 
         if self.os_env is not None:
             self.os_env.close()
@@ -1432,6 +1581,27 @@ class TerminalInstance:
         # Clean up the private dir (contains socket + fork).
         if self.private_dir.exists():
             shutil.rmtree(self.private_dir, ignore_errors=True)
+
+    def _refresh_ownership_record(self) -> _TerminalOwnershipRecord | None:
+        """Snapshot the live pane tree into this terminal's ownership record."""
+        path = self.private_dir / _OWNERSHIP_FILENAME
+        existing = _read_ownership_record(path)
+        owner = existing.owner if existing is not None else _proc.process_identity(os.getpid())
+        if owner is None:
+            return None
+        pane_pid = self.pane_pid_sync()
+        processes = tuple(_proc.snapshot_tree(pane_pid)) if pane_pid is not None else ()
+        record = _TerminalOwnershipRecord(owner=owner, processes=processes)
+        try:
+            _write_ownership_record(path, record)
+        except OSError:
+            logger.exception(
+                "failed to persist ownership for terminal %s:%s",
+                self.name,
+                self.session_key,
+            )
+            return None
+        return record
 
     def start_idle_watcher(
         self,
@@ -2030,6 +2200,12 @@ def create_terminal_instance(
     # server if we die without graceful shutdown (SIGKILL, harness
     # teardown) — see ``reap_orphaned_terminals``.
     (private_dir / _OWNER_PID_FILENAME).write_text(str(os.getpid()), encoding="utf-8")
+    owner_identity = _proc.process_identity(os.getpid())
+    if owner_identity is not None:
+        _write_ownership_record(
+            private_dir / _OWNERSHIP_FILENAME,
+            _TerminalOwnershipRecord(owner=owner_identity),
+        )
 
     # Resolve os_env spec.  If none specified, inherit from parent.
     effective_os_env_spec = build_terminal_os_env_spec(
