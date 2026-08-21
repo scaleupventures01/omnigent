@@ -18,6 +18,7 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus, InvalidURI
 from websockets.http11 import Response
 
+import omnigent.host.connect as connect_mod
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.connect import (
     HostConnectError,
@@ -55,6 +56,7 @@ from omnigent.host.frames import (
 )
 from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import ZygoteUnavailable
+from omnigent.inner import _proc
 from omnigent.runner.identity import (
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_ID_ENV_VAR,
@@ -1614,6 +1616,40 @@ def test_cleanup_runners_terminates_all(tmp_path: Path) -> None:
         assert proc.poll() is not None, f"Runner pid={proc.pid} should be dead after cleanup"
     # Tracking dict should be empty.
     assert host._runners == {}
+
+
+def test_direct_runner_spawn_uses_process_group_containment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host's direct-Popen fallback starts an independently killable tree."""
+    host = _make_host_process()
+    host._zygote = None
+    captured: dict[str, object] = {}
+    sentinel = SimpleNamespace(pid=1234)
+    log_path = tmp_path / "runner.log"
+
+    @contextlib.contextmanager
+    def _logging_kwargs(env: dict[str, str]):
+        yield {}
+
+    def _fake_open(*args: object, **kwargs: object):
+        return log_path, log_path.open("wb")
+
+    def _fake_popen(argv: list[str], **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(connect_mod, "child_logging_popen_kwargs", _logging_kwargs)
+    monkeypatch.setattr(connect_mod, "open_process_log_file", _fake_open)
+    monkeypatch.setattr(connect_mod.subprocess, "Popen", _fake_popen)
+
+    proc, returned_log = host._spawn_runner_proc({}, "test", tmp_path)
+
+    assert proc is sentinel
+    assert returned_log == log_path
+    for key, value in _proc.spawn_kwargs().items():
+        assert captured[key] == value
 
 
 def test_reap_orphans_reaps_orphaned_children(tmp_path: Path) -> None:

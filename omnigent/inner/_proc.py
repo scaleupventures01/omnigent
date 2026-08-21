@@ -24,7 +24,10 @@ import logging
 import os
 import signal
 import subprocess
+import time
+from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Protocol, TypedDict
 
 import psutil  # type: ignore[import-untyped]
@@ -91,6 +94,39 @@ class SpawnKwargs(TypedDict, total=False):
     creationflags: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProcessIdentity:
+    """A PID paired with its creation time to make reuse detectable."""
+
+    pid: int
+    create_time: float
+
+    def to_dict(self) -> dict[str, int | float]:
+        """Return the stable JSON representation used in ownership records."""
+        return {"pid": self.pid, "create_time": self.create_time}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ProcessIdentity:
+        """Parse an identity from an ownership record."""
+        pid = value.get("pid")
+        create_time = value.get("create_time")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise ValueError("process identity pid must be a positive integer")
+        if not isinstance(create_time, (int, float)) or isinstance(create_time, bool):
+            raise ValueError("process identity create_time must be numeric")
+        return cls(pid=pid, create_time=float(create_time))
+
+
+@dataclass(frozen=True, slots=True)
+class TeardownOutcome:
+    """Structured, auditable result of identity-verified process teardown."""
+
+    terminated: tuple[ProcessIdentity, ...] = ()
+    killed: tuple[ProcessIdentity, ...] = ()
+    survivors: tuple[ProcessIdentity, ...] = ()
+    skipped_mismatch: tuple[ProcessIdentity, ...] = ()
+
+
 class _ProcessLike(Protocol):
     """The subset of ``subprocess.Popen`` / ``asyncio.subprocess.Process`` used here."""
 
@@ -125,6 +161,106 @@ def spawn_kwargs() -> SpawnKwargs:
     if IS_POSIX:
         return {"start_new_session": True}
     return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+
+
+def process_identity(pid: int) -> ProcessIdentity | None:
+    """Return the stable identity for a live PID, or ``None`` if unavailable."""
+    if pid <= 0:
+        return None
+    try:
+        proc = psutil.Process(pid)
+        return ProcessIdentity(pid=pid, create_time=proc.create_time())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError, OSError):
+        return None
+
+
+def identity_matches(identity: ProcessIdentity) -> bool:
+    """Whether the PID still names the exact process captured by ``identity``."""
+    current = process_identity(identity.pid)
+    return current is not None and current.create_time == identity.create_time
+
+
+def snapshot_tree(pid: int) -> list[ProcessIdentity]:
+    """Capture stable identities for ``pid`` and every current descendant."""
+    identities: list[ProcessIdentity] = []
+    seen: set[int] = set()
+    for proc in _walk_descendants(pid):
+        if proc.pid in seen:
+            continue
+        seen.add(proc.pid)
+        try:
+            identities.append(ProcessIdentity(pid=proc.pid, create_time=proc.create_time()))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError, OSError):
+            continue
+    return identities
+
+
+def _identity_alive(identity: ProcessIdentity) -> bool:
+    """Return true only while the exact captured process remains live."""
+    return identity_matches(identity) and process_alive(identity.pid)
+
+
+def _wait_identities(identities: list[ProcessIdentity], timeout: float) -> list[ProcessIdentity]:
+    """Return identities still alive after at most ``timeout`` seconds."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    remaining = [identity for identity in identities if _identity_alive(identity)]
+    while remaining and time.monotonic() < deadline:
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        remaining = [identity for identity in remaining if _identity_alive(identity)]
+    return remaining
+
+
+def teardown_identities(
+    identities: list[ProcessIdentity] | tuple[ProcessIdentity, ...],
+    *,
+    grace: float = 1.0,
+) -> TeardownOutcome:
+    """TERM, verify, then KILL only the exact processes captured earlier."""
+    unique: list[ProcessIdentity] = []
+    seen: set[tuple[int, float]] = set()
+    for identity in identities:
+        key = (identity.pid, identity.create_time)
+        if key not in seen:
+            seen.add(key)
+            unique.append(identity)
+
+    active: list[ProcessIdentity] = []
+    skipped: list[ProcessIdentity] = []
+    for identity in reversed(unique):
+        if not identity_matches(identity):
+            skipped.append(identity)
+            continue
+        if not process_alive(identity.pid):
+            continue
+        try:
+            psutil.Process(identity.pid).terminate()
+            active.append(identity)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+
+    remaining = _wait_identities(active, grace)
+    remaining_keys = {(item.pid, item.create_time) for item in remaining}
+    terminated = [item for item in active if (item.pid, item.create_time) not in remaining_keys]
+    kill_targets: list[ProcessIdentity] = []
+    for identity in remaining:
+        if not identity_matches(identity):
+            skipped.append(identity)
+            continue
+        try:
+            psutil.Process(identity.pid).kill()
+            kill_targets.append(identity)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+
+    survivors = _wait_identities(kill_targets, grace)
+    survivor_keys = {(item.pid, item.create_time) for item in survivors}
+    killed = [item for item in kill_targets if (item.pid, item.create_time) not in survivor_keys]
+    return TeardownOutcome(
+        terminated=tuple(terminated),
+        killed=tuple(killed),
+        survivors=tuple(survivors),
+        skipped_mismatch=tuple(skipped),
+    )
 
 
 def _killpg(pid: int, sig: int) -> bool:
@@ -186,10 +322,17 @@ def terminate_tree(process: _ProcessLike | None, *, grace: float = 0.0) -> None:
     """
     if process is None or process.returncode is not None:
         return
-    pid = process.pid
+    pid = getattr(process, "pid", None)
     if pid is None:
-        with suppress(Exception):
-            process.terminate()
+        terminate = getattr(process, "terminate", None)
+        if callable(terminate):
+            with suppress(Exception):
+                terminate()
+        else:
+            send_signal = getattr(process, "send_signal", None)
+            if callable(send_signal):
+                with suppress(Exception):
+                    send_signal(signal.SIGTERM)
         return
 
     if _killpg(pid, signal.SIGTERM):
@@ -218,10 +361,12 @@ def kill_tree(process: _ProcessLike | None) -> None:
     """
     if process is None or process.returncode is not None:
         return
-    pid = process.pid
+    pid = getattr(process, "pid", None)
     if pid is None:
-        with suppress(Exception):
-            process.kill()
+        kill = getattr(process, "kill", None)
+        if callable(kill):
+            with suppress(Exception):
+                kill()
         return
 
     if _killpg(pid, _SIGKILL):

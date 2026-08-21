@@ -317,7 +317,7 @@ async def _wait_for_bind(
         if loop.time() >= deadline:
             # Process never bound — kill it and fail loud rather
             # than wait forever.
-            process.kill()
+            _proc.kill_tree(process)
             await process.wait()
             raise RuntimeError(
                 f"harness {harness!r} for conversation "
@@ -1264,7 +1264,7 @@ class HarnessProcessManager:
             # the idle reaper — which only walks ``_entries`` — never sees.
             if process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
-                    process.kill()
+                    _proc.kill_tree(process)
                 # Shield the corpse-wait so a second cancellation cannot
                 # abandon the reap halfway; the pending cancellation is
                 # re-raised below regardless.
@@ -1315,6 +1315,7 @@ class HarnessProcessManager:
             stdout=None,
             stderr=None,
             env=effective_env,
+            **_proc.spawn_kwargs(),
         )
 
     async def _close_entry(self, entry: _SubprocessEntry) -> None:
@@ -1340,9 +1341,11 @@ class HarnessProcessManager:
             # A broken transport must not skip the subprocess kill below.
             _logger.exception("error closing harness client during teardown; continuing")
         finally:
+            pid = getattr(entry.process, "pid", None)
+            owned = _proc.snapshot_tree(pid) if isinstance(pid, int) else []
             if entry.process.returncode is None:
                 try:
-                    entry.process.send_signal(signal.SIGTERM)
+                    _proc.terminate_tree(entry.process)
                     await asyncio.wait_for(entry.process.wait(), timeout=_RELEASE_GRACE_S)
                 except Exception:
                     # Graceful SIGTERM didn't complete — it timed out, or
@@ -1350,8 +1353,19 @@ class HarnessProcessManager:
                     # mid-teardown). Force-kill best-effort; a process that
                     # is already gone is already done.
                     with contextlib.suppress(Exception):
-                        entry.process.kill()
+                        _proc.kill_tree(entry.process)
                         await entry.process.wait()
+            if owned:
+                outcome = await asyncio.to_thread(
+                    _proc.teardown_identities,
+                    owned,
+                    grace=min(_RELEASE_GRACE_S, 0.5),
+                )
+                if outcome.survivors:
+                    _logger.error(
+                        "harness teardown left survivors pids=%s",
+                        [identity.pid for identity in outcome.survivors],
+                    )
             with contextlib.suppress(Exception):
                 close_subprocess_transport(entry.process)
             # Best-effort socket cleanup. uvicorn's atexit usually

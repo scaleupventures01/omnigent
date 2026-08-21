@@ -236,6 +236,7 @@ class ZygoteManager:
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=log_fh,
+                **_proc.spawn_kwargs(),
             )
 
     def fork_runner(self, env: dict[str, str], log_path: str, workspace: str) -> ZygoteRunnerProc:
@@ -299,16 +300,24 @@ class ZygoteManager:
                 finally:
                     self._sock = None
             if self._proc is not None:
+                owned = _proc.snapshot_tree(self._proc.pid)
                 if self._proc.poll() is None:
-                    self._proc.terminate()
+                    _proc.terminate_tree(self._proc)
                     try:
                         self._proc.wait(timeout=5.0)
                     except subprocess.TimeoutExpired:
-                        self._proc.kill()
+                        _proc.kill_tree(self._proc)
                         # Reap after SIGKILL so the zygote doesn't linger as a
                         # zombie until the daemon exits / the Popen is GC'd.
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             self._proc.wait(timeout=5.0)
+                if owned:
+                    outcome = _proc.teardown_identities(owned, grace=0.5)
+                    if outcome.survivors:
+                        logger.error(
+                            "zygote teardown left survivors pids=%s",
+                            [identity.pid for identity in outcome.survivors],
+                        )
                 self._proc = None
 
     def _exchange(self, request: dict[str, object]) -> dict[str, object]:

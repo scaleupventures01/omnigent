@@ -48,9 +48,11 @@ import importlib.util
 import json
 import os
 import selectors
+import signal
 import socket
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -80,6 +82,7 @@ _ZYGOTE_TEST_CHILD_RAISE_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_RAISE"
 # genuinely alive) instead of exiting, so a test can kill the zygote out from
 # under a live child and assert the crash-recovery path. Never set in prod.
 _ZYGOTE_TEST_CHILD_SLEEP_ENV_VAR = "OMNIGENT_RUNNER_ZYGOTE_TEST_CHILD_SLEEP"
+_ORPHAN_HARNESS_GRACE_S = 0.5
 
 
 def _disk_build_stamp(package_dir: Path | None = None) -> tuple[float, str] | None:
@@ -331,6 +334,7 @@ class _ZygoteServer:
         # Pids whose exit code must be discarded (not stored) when reaped: a
         # dropped runner's harness children that nothing will ever poll.
         self._orphaned: set[int] = set()
+        self._orphan_deadlines: dict[int, float] = {}
         # Every zygote-side control socket a forked child inherits and must
         # close (the daemon socket + all runner sockets).
         self._control_socks: set[socket.socket] = {control_sock}
@@ -359,6 +363,7 @@ class _ZygoteServer:
         zombies but their exit code is discarded rather than stored, since no
         client remains to poll it.
         """
+        self._escalate_orphans()
         for pid in list(self._live):
             try:
                 waited, status = os.waitpid(pid, os.WNOHANG)
@@ -368,6 +373,7 @@ class _ZygoteServer:
             if waited == 0:
                 continue
             self._live.discard(pid)
+            self._orphan_deadlines.pop(pid, None)
             if pid in self._orphaned:
                 self._orphaned.discard(pid)
                 continue
@@ -377,6 +383,7 @@ class _ZygoteServer:
         """Drop all tracking state for a pid that is no longer reapable."""
         self._live.discard(pid)
         self._orphaned.discard(pid)
+        self._orphan_deadlines.pop(pid, None)
         self._release_harness_pid(pid)
 
     def _release_harness_pid(self, pid: int) -> None:
@@ -392,6 +399,32 @@ class _ZygoteServer:
         """
         for owned in self._runner_harness_pids.values():
             owned.discard(pid)
+        self._orphan_deadlines.pop(pid, None)
+
+    def _orphan_harnesses(self, runner_fileno: int) -> None:
+        """Terminate harness siblings owned by a runner that disconnected."""
+        deadline = time.monotonic() + _ORPHAN_HARNESS_GRACE_S
+        for harness_pid in self._runner_harness_pids.pop(runner_fileno, set()):
+            self._exit_codes.pop(harness_pid, None)
+            if harness_pid not in self._live:
+                continue
+            self._orphaned.add(harness_pid)
+            self._orphan_deadlines[harness_pid] = deadline
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.kill(harness_pid, signal.SIGTERM)
+
+    def _escalate_orphans(self) -> None:
+        """SIGKILL orphan harnesses after their bounded graceful window."""
+        now = time.monotonic()
+        for pid, deadline in list(self._orphan_deadlines.items()):
+            if pid not in self._live:
+                self._orphan_deadlines.pop(pid, None)
+                continue
+            if now < deadline:
+                continue
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.kill(pid, signal.SIGKILL)
+            self._orphan_deadlines.pop(pid, None)
 
     def _take_exit_code(self, pid: int) -> int | None:
         """Pop *pid*'s exit code, releasing its harness ownership with it.
@@ -619,10 +652,7 @@ class _ZygoteServer:
             self._sel.unregister(conn)
         self._control_socks.discard(conn)
         self._buffers.pop(fileno, None)
-        for harness_pid in self._runner_harness_pids.pop(fileno, set()):
-            self._exit_codes.pop(harness_pid, None)
-            if harness_pid in self._live:
-                self._orphaned.add(harness_pid)
+        self._orphan_harnesses(fileno)
         with contextlib.suppress(OSError):
             conn.close()
 

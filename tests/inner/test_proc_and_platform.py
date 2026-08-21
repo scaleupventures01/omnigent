@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -189,6 +190,102 @@ def test_process_alive_is_a_nondestructive_probe() -> None:
 def test_process_alive_false_for_bogus_pid() -> None:
     assert _proc.process_alive(2_000_000_000) is False
     assert _proc.process_alive(-1) is False
+
+
+def test_process_identity_round_trip_and_rejects_reused_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted identities include creation time so PID reuse fails closed."""
+    identity = _proc.ProcessIdentity(pid=4321, create_time=123.5)
+
+    assert _proc.ProcessIdentity.from_dict(identity.to_dict()) == identity
+    monkeypatch.setattr(_proc, "process_identity", lambda pid: identity)
+    assert _proc.identity_matches(identity) is True
+    monkeypatch.setattr(
+        _proc,
+        "process_identity",
+        lambda pid: _proc.ProcessIdentity(pid=pid, create_time=999.0),
+    )
+    assert _proc.identity_matches(identity) is False
+
+
+def test_snapshot_tree_captures_root_and_descendant() -> None:
+    """An ownership snapshot contains stable identities for the whole tree."""
+    parent = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, time; subprocess.Popen(['sleep', '30']); time.sleep(30)",
+        ],
+        **_proc.spawn_kwargs(),
+    )
+    try:
+        root = psutil.Process(parent.pid)
+        for _ in range(100):
+            if root.children(recursive=True):
+                break
+            time.sleep(0.01)
+        identities = _proc.snapshot_tree(parent.pid)
+        assert identities[0].pid == parent.pid
+        assert {item.pid for item in identities} >= {
+            parent.pid,
+            root.children(recursive=True)[0].pid,
+        }
+    finally:
+        _proc.kill_tree(parent)
+        parent.wait(timeout=5)
+
+
+def test_teardown_identities_escalates_and_verifies() -> None:
+    """A TERM-resistant owned process is killed and absent on return."""
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "print('ready', flush=True); "
+                "time.sleep(30)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        **_proc.spawn_kwargs(),
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "ready"
+        identity = _proc.process_identity(proc.pid)
+        assert identity is not None
+
+        outcome = _proc.teardown_identities([identity], grace=0.05)
+
+        assert outcome.terminated == ()
+        assert outcome.killed == (identity,)
+        assert outcome.survivors == ()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            _proc.kill_tree(proc)
+            proc.wait(timeout=5)
+
+
+def test_teardown_identities_skips_pid_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mismatched creation time is never signaled."""
+    stale = _proc.ProcessIdentity(pid=os.getpid(), create_time=0.0)
+    monkeypatch.setattr(
+        psutil.Process,
+        "terminate",
+        lambda self: (_ for _ in ()).throw(AssertionError("must not signal reused pid")),
+    )
+
+    outcome = _proc.teardown_identities([stale], grace=0)
+
+    assert outcome.skipped_mismatch == (stale,)
+    assert outcome.survivors == ()
 
 
 def test_terminate_tree_stops_the_process() -> None:

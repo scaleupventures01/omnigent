@@ -1484,6 +1484,7 @@ class HostProcess:
                     stdout=log_fh,
                     stderr=log_fh,
                     **logging_kwargs,
+                    **_proc.spawn_kwargs(),
                 )
             return proc, log_path
         finally:
@@ -1560,17 +1561,26 @@ class HostProcess:
         """
         if proc.poll() is not None:
             return
-        proc.terminate()
+        pid = getattr(proc, "pid", None)
+        owned = _proc.snapshot_tree(pid) if isinstance(pid, int) else []
+        _proc.terminate_tree(proc)
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _proc.kill_tree(proc)
             # Bounded: a bare wait() would hang if the handle can't observe the
             # exit (e.g. a zygote-forked runner whose zygote died and whose pid
             # probe is the only signal). The kill has been sent; give it a short
             # window, then move on.
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=5.0)
+        if owned:
+            outcome = _proc.teardown_identities(owned, grace=0.5)
+            if outcome.survivors:
+                _logger.error(
+                    "runner teardown left survivors pids=%s",
+                    [identity.pid for identity in outcome.survivors],
+                )
 
     async def _handle_runner_status(
         self,

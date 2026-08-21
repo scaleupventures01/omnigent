@@ -36,6 +36,8 @@ from pathlib import Path
 
 import pytest
 
+import omnigent.runtime.harnesses.process_manager as process_manager_mod
+from omnigent.inner import _proc
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
@@ -50,6 +52,28 @@ from omnigent.runtime.harnesses.process_manager import (
 
 _TEST_HARNESS_NAME = "test"
 _TEST_HARNESS_MODULE = "tests.runtime.harnesses._test_harness"
+
+
+@pytest.mark.asyncio
+async def test_direct_harness_spawn_uses_process_group_containment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The non-zygote harness path starts an independently killable tree."""
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    async def _fake_exec(*args: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(process_manager_mod.asyncio, "create_subprocess_exec", _fake_exec)
+    manager = HarnessProcessManager(tmp_parent=tmp_path)
+    manager._harness_zygote = None
+
+    assert await manager._spawn_harness_process([], {}) is sentinel
+    for key, value in _proc.spawn_kwargs().items():
+        assert captured[key] == value
 
 
 @pytest.fixture
