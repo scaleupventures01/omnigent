@@ -48,6 +48,7 @@ from omnigent.onboarding.provider_config import (
     BEDROCK_KIND,
     CLI_CONFIG_KIND,
     DATABRICKS_KIND,
+    LOCAL_KIND,
     OPENAI_FAMILY,
     RESPONSES_WIRE_API,
     SUBSCRIPTION_KIND,
@@ -1457,6 +1458,10 @@ def _build_qwen_spawn_env(
     provider = _resolve_provider_for_build(spec, harness_type="qwen", for_launch=True)
     if provider is not None:
         configure_agent_harness_with_provider(env, provider, harness_type="qwen")
+        if provider.kind == LOCAL_KIND:
+            local_family = provider.family(OPENAI_FAMILY)
+            if local_family is not None and local_family.api_key == "ollama":
+                env["HARNESS_QWEN_OLLAMA"] = "true"
     # NB: no skills bridge for qwen yet. Unlike the claude-sdk / codex
     # variants, the qwen wrap (omnigent/inner/qwen_harness.py) and
     # QwenExecutor have no skills concept, so emitting

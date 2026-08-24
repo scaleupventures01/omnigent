@@ -801,6 +801,64 @@ def test_qwen_uses_openai_global_default(config_home: Path) -> None:
     assert env["HARNESS_QWEN_MODEL"] == "gpt-default-model"
 
 
+def test_qwen_local_provider_marks_ollama_readiness_route(config_home: Path) -> None:
+    """A local provider reaches the Qwen wrap as a fail-loud local route."""
+    _write_config(
+        config_home,
+        {
+            "providers": {
+                "ollama": {
+                    "kind": "local",
+                    "openai": {
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "api_key": "ollama",
+                        "models": {"default": "qwen3.8:27b"},
+                    },
+                }
+            }
+        },
+    )
+    spec = _make_spec(
+        harness="qwen",
+        model="qwen3.8:27b",
+        auth=ProviderAuth(name="ollama"),
+    )
+
+    env = _build_qwen_spawn_env(spec, workdir=None)
+
+    assert env["HARNESS_QWEN_OLLAMA"] == "true"
+    assert env["HARNESS_QWEN_GATEWAY_BASE_URL"] == "http://127.0.0.1:11434/v1"
+    assert env["HARNESS_QWEN_MODEL"] == "qwen3.8:27b"
+
+
+def test_qwen_non_ollama_local_provider_is_not_probed_as_ollama(config_home: Path) -> None:
+    """Other OpenAI-compatible local servers retain their existing route."""
+    _write_config(
+        config_home,
+        {
+            "providers": {
+                "lmstudio": {
+                    "kind": "local",
+                    "openai": {
+                        "base_url": "http://127.0.0.1:1234/v1",
+                        "api_key": "lm-studio",
+                        "models": {"default": "local-model"},
+                    },
+                }
+            }
+        },
+    )
+    spec = _make_spec(
+        harness="qwen",
+        model="local-model",
+        auth=ProviderAuth(name="lmstudio"),
+    )
+
+    env = _build_qwen_spawn_env(spec, workdir=None)
+
+    assert "HARNESS_QWEN_OLLAMA" not in env
+
+
 def test_goose_spawn_env_forwards_model_and_no_gateway(config_home: Path) -> None:
     """The headless goose builder forwards a spec model as ``HARNESS_GOOSE_MODEL``
     and wires NO provider/gateway credential (Goose owns its own auth)."""

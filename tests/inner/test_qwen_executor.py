@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from omnigent.inner import qwen_executor as qwen_executor_mod
 from omnigent.inner.executor import (
     ExecutorError,
     TextChunk,
@@ -402,6 +403,43 @@ async def test_start_process_resets_handshake_state(
 
     assert executor._initialized is False
     assert executor._image_supported is False
+
+
+@pytest.mark.asyncio
+async def test_start_process_uses_flag_supported_by_installed_qwen_help(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Qwen Code 0.0.6 advertises only ``--experimental-acp`` for ACP mode."""
+    installed_help = """
+qwen [options]
+      --experimental-acp          Starts the agent in ACP mode  [boolean]
+"""
+    captured: dict[str, object] = {}
+
+    async def _fake_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        proc = MagicMock()
+        proc.stdout = AsyncMock()
+        proc.stdout.readline = AsyncMock(return_value=b"")
+        proc.stderr = AsyncMock()
+        proc.stderr.readline = AsyncMock(return_value=b"")
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_subprocess_exec)
+    executor = QwenExecutor(qwen_path="/usr/bin/qwen")
+    await executor._start_process()
+
+    argv = captured["args"]
+    assert isinstance(argv, tuple)
+    acp_flag = argv[1]
+    advertised_options = {
+        token
+        for line in installed_help.splitlines()
+        for token in line.split()
+        if token.startswith("--")
+    }
+    assert acp_flag in advertised_options
+    assert acp_flag == "--experimental-acp"
 
 
 # ---------------------------------------------------------------------------
@@ -944,11 +982,13 @@ def test_wrap_passes_gateway_env_to_executor(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("HARNESS_QWEN_MODEL", "qwen/qwen3-coder")
     monkeypatch.setenv("HARNESS_QWEN_GATEWAY_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("HARNESS_QWEN_GATEWAY_AUTH_COMMAND", "printf '%s' sk-x")
+    monkeypatch.setenv("HARNESS_QWEN_OLLAMA", "true")
 
     executor = qwen_harness._build_qwen_executor()
     assert isinstance(executor, QwenExecutor)
     assert executor._gateway_base_url == "https://gw.example/v1"
     assert executor._gateway_auth_command == "printf '%s' sk-x"
+    assert executor._ollama is True
 
 
 def test_wrap_gateway_env_absent_leaves_executor_ungated(
@@ -959,11 +999,13 @@ def test_wrap_gateway_env_absent_leaves_executor_ungated(
 
     monkeypatch.delenv("HARNESS_QWEN_GATEWAY_BASE_URL", raising=False)
     monkeypatch.delenv("HARNESS_QWEN_GATEWAY_AUTH_COMMAND", raising=False)
+    monkeypatch.delenv("HARNESS_QWEN_OLLAMA", raising=False)
 
     executor = qwen_harness._build_qwen_executor()
     assert isinstance(executor, QwenExecutor)
     assert executor._gateway_base_url is None
     assert executor._gateway_auth_command is None
+    assert executor._ollama is False
 
 
 # ---------------------------------------------------------------------------
@@ -2111,6 +2153,105 @@ async def test_resolve_gateway_env_omits_model_when_unset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_local_ollama_route_overrides_ambient_qwen_oauth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The managed system layer wins without rewriting ~/.qwen/settings.json."""
+    config_home = tmp_path / "omnigent"
+    ambient = tmp_path / ".qwen" / "settings.json"
+    ambient.parent.mkdir()
+    ambient.write_text('{"selectedAuthType":"qwen-oauth"}\n', encoding="utf-8")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        qwen_executor_mod,
+        "_fetch_ollama_models",
+        lambda _url, _timeout: {"qwen3.8:27b"},
+    )
+
+    executor = QwenExecutor(
+        model="qwen3.8:27b",
+        gateway_base_url="http://127.0.0.1:11434/v1",
+        gateway_auth_command="printf '%s' ollama",
+        ollama=True,
+    )
+    env = await executor._build_spawn_env()
+
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:11434/v1"
+    assert env["OPENAI_API_KEY"] == "ollama"
+    assert env["OPENAI_MODEL"] == "qwen3.8:27b"
+    system_settings = Path(env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
+    assert system_settings.parent == config_home / "qwen"
+    assert json.loads(system_settings.read_text(encoding="utf-8")) == {
+        "selectedAuthType": "openai"
+    }
+    assert ambient.read_text(encoding="utf-8") == '{"selectedAuthType":"qwen-oauth"}\n'
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_route_rejects_missing_openai_model() -> None:
+    """A local route cannot fall through to qwen3-coder-plus."""
+    executor = QwenExecutor(
+        gateway_base_url="http://127.0.0.1:11434/v1",
+        gateway_auth_command="printf '%s' ollama",
+        ollama=True,
+    )
+
+    with pytest.raises(RuntimeError, match="OPENAI_MODEL"):
+        await executor._build_spawn_env()
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_route_rejects_unreachable_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrong local endpoint names Ollama, the endpoint, and recovery."""
+
+    def _unreachable(_url: str, _timeout: float) -> set[str]:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(qwen_executor_mod, "_fetch_ollama_models", _unreachable)
+    executor = QwenExecutor(
+        model="qwen3.8:27b",
+        gateway_base_url="http://127.0.0.1:65535/v1",
+        gateway_auth_command="printf '%s' ollama",
+        ollama=True,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await executor._build_spawn_env()
+    message = str(exc_info.value)
+    assert "Ollama" in message
+    assert "127.0.0.1:65535" in message
+    assert "start ollama" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_route_rejects_missing_installed_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local route never falls back when the pinned model is absent."""
+    monkeypatch.setattr(
+        qwen_executor_mod,
+        "_fetch_ollama_models",
+        lambda _url, _timeout: {"qwen3-coder-plus"},
+    )
+    executor = QwenExecutor(
+        model="qwen3.8:27b",
+        gateway_base_url="http://127.0.0.1:11434/v1",
+        gateway_auth_command="printf '%s' ollama",
+        ollama=True,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await executor._build_spawn_env()
+    message = str(exc_info.value)
+    assert "qwen3.8:27b" in message
+    assert "ollama pull qwen3.8:27b" in message
+    assert "qwen3-coder-plus" not in message
+
+
+@pytest.mark.asyncio
 async def test_ensure_initialized_captures_image_capability() -> None:
     """initialize handshake records promptCapabilities.image on the executor."""
     executor = QwenExecutor(model="m")
@@ -2130,3 +2271,66 @@ async def test_ensure_initialized_image_capability_defaults_false() -> None:
     await executor._ensure_initialized()
     assert executor._initialized is True
     assert executor._image_supported is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_initialized_detects_installed_legacy_protocol() -> None:
+    """The installed Qwen Code reports ACP 0.0.9 and selects legacy methods."""
+    executor = QwenExecutor(model="qwen3.8:27b")
+    executor._rpc = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "result": {
+                "protocolVersion": "0.0.9",
+                "isAuthenticated": True,
+            }
+        }
+    )
+
+    await executor._ensure_initialized()
+
+    assert executor._initialized is True
+    assert executor._legacy_acp is True
+
+
+@pytest.mark.asyncio
+async def test_installed_legacy_acp_turn_uses_send_user_message() -> None:
+    """Protocol 0.0.9 streams the sentinel through legacy ACP method names."""
+    executor = QwenExecutor(model="qwen3.8:27b")
+    executor._proc = MagicMock(returncode=None)
+    executor._initialized = True
+    executor._legacy_acp = True
+    executor._session_id = "legacy"
+    sent: list[dict[str, object]] = []
+
+    async def _fake_send(message: dict[str, object]) -> None:
+        sent.append(message)
+        if message.get("method") == "sendUserMessage":
+            request_id = message["id"]
+            assert isinstance(request_id, int)
+            await executor._queue.put(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "method": "streamAssistantMessageChunk",
+                    "params": {"chunk": {"text": "QWEN_OMNIGENT_OK"}},
+                }
+            )
+            executor._pending[request_id].set_result(
+                {"jsonrpc": "2.0", "id": request_id, "result": None}
+            )
+
+    executor._send = _fake_send  # type: ignore[method-assign]
+    events = []
+    async for event in executor.run_turn(
+        [{"role": "user", "content": "Return the sentinel"}], [], ""
+    ):
+        events.append(event)
+
+    request = next(message for message in sent if "method" in message)
+    assert request["method"] == "sendUserMessage"
+    assert request["params"] == {"chunks": [{"text": "Return the sentinel"}]}
+    assert any(message.get("id") == 99 and message.get("result") is None for message in sent)
+    assert [event.text for event in events if isinstance(event, TextChunk)] == ["QWEN_OMNIGENT_OK"]
+    assert [event.response for event in events if isinstance(event, TurnComplete)] == [
+        "QWEN_OMNIGENT_OK"
+    ]
