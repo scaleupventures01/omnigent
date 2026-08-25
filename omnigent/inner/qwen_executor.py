@@ -138,6 +138,7 @@ _INIT_TIMEOUT_SECONDS = 30.0
 _PROTOCOL_VERSION = 1
 
 _QWEN_SYSTEM_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+_QWEN_CURRENT_SYSTEM_SETTINGS_ENV = "QWEN_CODE_SYSTEM_SETTINGS_PATH"
 _OLLAMA_READINESS_TIMEOUT_SECONDS = 3.0
 # Qwen Code 0.0.6 exposes ACP under this flag; ``--acp`` is rejected.
 _QWEN_ACP_FLAG = "--experimental-acp"
@@ -164,13 +165,33 @@ def _fetch_ollama_models(base_url: str, timeout: float) -> set[str]:
     return models
 
 
-def _materialize_qwen_system_settings() -> Path:
+def _materialize_qwen_system_settings(base_url: str, model: str) -> Path:
     """Write Omnigent's authoritative Qwen auth layer outside ``~/.qwen``."""
     target = global_config_path().parent / "qwen" / "system-settings.json"
     target.parent.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(target.parent, stat.S_IRWXU)
-    rendered = json.dumps({"selectedAuthType": "openai"}, sort_keys=True) + "\n"
+    # Qwen Code <=0.0.6 reads the legacy top-level key, while current
+    # releases read security.auth.selectedType. Keep both so Omnigent's
+    # isolated provider selection works across the ACP compatibility range.
+    rendered = json.dumps(
+        {
+            "model": {"name": model},
+            "modelProviders": {
+                "openai": [
+                    {
+                        "baseUrl": base_url,
+                        "envKey": "OPENAI_API_KEY",
+                        "id": model,
+                        "name": model,
+                    }
+                ]
+            },
+            "security": {"auth": {"selectedType": "openai"}},
+            "selectedAuthType": "openai",
+        },
+        sort_keys=True,
+    ) + "\n"
     if target.is_file() and not target.is_symlink():
         try:
             if target.read_text(encoding="utf-8") == rendered:
@@ -507,8 +528,11 @@ class QwenExecutor(Executor):
                 gateway_env["OPENAI_BASE_URL"], gateway_env["OPENAI_MODEL"]
             )
         if gateway_env:
-            self._system_settings_path = _materialize_qwen_system_settings()
+            self._system_settings_path = _materialize_qwen_system_settings(
+                gateway_env["OPENAI_BASE_URL"], gateway_env["OPENAI_MODEL"]
+            )
             gateway_env[_QWEN_SYSTEM_SETTINGS_ENV] = str(self._system_settings_path)
+            gateway_env[_QWEN_CURRENT_SYSTEM_SETTINGS_ENV] = str(self._system_settings_path)
         env.update(gateway_env)
         return env
 
