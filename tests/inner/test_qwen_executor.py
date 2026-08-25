@@ -2181,8 +2181,21 @@ async def test_local_ollama_route_overrides_ambient_qwen_oauth(
     assert env["OPENAI_API_KEY"] == "ollama"
     assert env["OPENAI_MODEL"] == "qwen3.8:27b"
     system_settings = Path(env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
+    assert env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] == str(system_settings)
     assert system_settings.parent == config_home / "qwen"
     assert json.loads(system_settings.read_text(encoding="utf-8")) == {
+        "model": {"name": "qwen3.8:27b"},
+        "modelProviders": {
+            "openai": [
+                {
+                    "baseUrl": "http://127.0.0.1:11434/v1",
+                    "envKey": "OPENAI_API_KEY",
+                    "id": "qwen3.8:27b",
+                    "name": "qwen3.8:27b",
+                }
+            ]
+        },
+        "security": {"auth": {"selectedType": "openai"}},
         "selectedAuthType": "openai"
     }
     assert ambient.read_text(encoding="utf-8") == '{"selectedAuthType":"qwen-oauth"}\n'
