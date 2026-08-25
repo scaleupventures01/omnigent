@@ -170,7 +170,16 @@ def _materialize_qwen_system_settings() -> Path:
     target.parent.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(target.parent, stat.S_IRWXU)
-    rendered = json.dumps({"selectedAuthType": "openai"}, sort_keys=True) + "\n"
+    # Qwen Code <=0.0.6 reads the legacy top-level key, while current
+    # releases read security.auth.selectedType. Keep both so Omnigent's
+    # isolated provider selection works across the ACP compatibility range.
+    rendered = json.dumps(
+        {
+            "security": {"auth": {"selectedType": "openai"}},
+            "selectedAuthType": "openai",
+        },
+        sort_keys=True,
+    ) + "\n"
     if target.is_file() and not target.is_symlink():
         try:
             if target.read_text(encoding="utf-8") == rendered:

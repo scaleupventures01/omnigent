@@ -2183,6 +2183,7 @@ async def test_local_ollama_route_overrides_ambient_qwen_oauth(
     system_settings = Path(env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
     assert system_settings.parent == config_home / "qwen"
     assert json.loads(system_settings.read_text(encoding="utf-8")) == {
+        "security": {"auth": {"selectedType": "openai"}},
         "selectedAuthType": "openai"
     }
     assert ambient.read_text(encoding="utf-8") == '{"selectedAuthType":"qwen-oauth"}\n'
