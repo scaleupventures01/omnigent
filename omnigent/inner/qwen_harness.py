@@ -34,6 +34,8 @@ Env vars read at startup:
   ``providers:`` config. When both are set, the executor exports
   ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL`` into the ``qwen``
   subprocess instead of relying on the CLI's ambient auth.
+- ``HARNESS_QWEN_OLLAMA``: marks an Ollama-backed ``kind: local``
+  provider so the executor checks endpoint and model readiness before launch.
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ _ENV_OS_ENV = "HARNESS_QWEN_OS_ENV"
 # vars the qwen CLI reads. See docs/QWEN_FOLLOWUPS.md.
 _ENV_GATEWAY_BASE_URL = "HARNESS_QWEN_GATEWAY_BASE_URL"
 _ENV_GATEWAY_AUTH_COMMAND = "HARNESS_QWEN_GATEWAY_AUTH_COMMAND"
+_ENV_OLLAMA = "HARNESS_QWEN_OLLAMA"
 
 
 def _resolve_os_env() -> OSEnvSpec:
@@ -142,6 +145,12 @@ def _build_qwen_executor() -> Executor:
     qwen_path = resolve_harness_path("qwen")
     gateway_base_url = os.environ.get(_ENV_GATEWAY_BASE_URL, "").strip() or None
     gateway_auth_command = os.environ.get(_ENV_GATEWAY_AUTH_COMMAND, "").strip() or None
+    ollama = os.environ.get(_ENV_OLLAMA, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     return QwenExecutor(
         cwd=cwd,
@@ -150,6 +159,7 @@ def _build_qwen_executor() -> Executor:
         qwen_path=qwen_path,
         gateway_base_url=gateway_base_url,
         gateway_auth_command=gateway_auth_command,
+        ollama=ollama,
     )
 
 

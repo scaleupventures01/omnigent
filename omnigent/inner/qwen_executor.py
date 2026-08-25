@@ -1,6 +1,6 @@
 """QwenExecutor: run agents through Qwen Code's ACP mode.
 
-Spawns Qwen (``qwen --acp``) as a subprocess and communicates via the
+Spawns Qwen (``qwen --experimental-acp``) as a subprocess and communicates via the
 Agent Communication Protocol (ACP) — a JSON-RPC 2.0 protocol over
 newline-delimited JSON on stdin/stdout.
 
@@ -11,6 +11,9 @@ Protocol flow:
      ``session/update`` notifications and the final response.
   4. Repeat step 3 for subsequent turns (``session/load`` or just re-use the
      same sessionId if the server keeps it alive across prompts).
+
+Qwen Code 0.0.6 reports legacy ACP 0.0.9 after initialization; that branch uses
+``sendUserMessage`` / ``streamAssistantMessageChunk`` without session methods.
 
 Qwen manages its own agent loop, tool execution, context window, and
 compaction internally.  This executor translates the ACP event stream into
@@ -28,10 +31,15 @@ import json
 import logging
 import os
 import secrets
+import stat
+import tempfile
+import urllib.request
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
+from urllib.parse import urlsplit, urlunsplit
 
+from omnigent.config import global_config_path
 from omnigent.inner._acp_omnigent_mcp import OmnigentAcpMcp
 from omnigent.inner.agent_env import clean_agent_env, declared_passthrough
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
@@ -110,9 +118,11 @@ def _looks_like_missing_file(message: str) -> bool:
 _AGENT_METHOD_INITIALIZE = "initialize"
 _AGENT_METHOD_SESSION_NEW = "session/new"
 _AGENT_METHOD_SESSION_PROMPT = "session/prompt"
+_LEGACY_AGENT_METHOD_SEND_USER_MESSAGE = "sendUserMessage"
 
 # Notifications sent *from* the agent to the client
 _CLIENT_NOTIFICATION_SESSION_UPDATE = "session/update"
+_LEGACY_CLIENT_REQUEST_STREAM_CHUNK = "streamAssistantMessageChunk"
 
 # session/update.update.sessionUpdate values we care about
 _UPDATE_AGENT_MESSAGE_CHUNK = "agent_message_chunk"
@@ -126,6 +136,72 @@ _INIT_TIMEOUT_SECONDS = 30.0
 
 # ACP protocol version this executor targets.
 _PROTOCOL_VERSION = 1
+
+_QWEN_SYSTEM_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+_OLLAMA_READINESS_TIMEOUT_SECONDS = 3.0
+# Qwen Code 0.0.6 exposes ACP under this flag; ``--acp`` is rejected.
+_QWEN_ACP_FLAG = "--experimental-acp"
+
+
+def _fetch_ollama_models(base_url: str, timeout: float) -> set[str]:
+    """Return model ids from the Ollama inventory behind *base_url*."""
+    parsed = urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"invalid local Ollama endpoint: {base_url!r}")
+    tags_url = urlunsplit((parsed.scheme, parsed.netloc, "/api/tags", "", ""))
+    with urllib.request.urlopen(tags_url, timeout=timeout) as response:
+        payload = json.loads(response.read(4 * 1024 * 1024))
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        raise ValueError("Ollama /api/tags returned an invalid model inventory")
+    models: set[str] = set()
+    for row in payload["models"]:
+        if not isinstance(row, dict):
+            continue
+        for key in ("name", "model"):
+            value = row.get(key)
+            if isinstance(value, str) and value:
+                models.add(value)
+    return models
+
+
+def _materialize_qwen_system_settings() -> Path:
+    """Write Omnigent's authoritative Qwen auth layer outside ``~/.qwen``."""
+    target = global_config_path().parent / "qwen" / "system-settings.json"
+    target.parent.mkdir(mode=stat.S_IRWXU, parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(target.parent, stat.S_IRWXU)
+    rendered = json.dumps({"selectedAuthType": "openai"}, sort_keys=True) + "\n"
+    if target.is_file() and not target.is_symlink():
+        try:
+            if target.read_text(encoding="utf-8") == rendered:
+                os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)
+                return target
+        except OSError:
+            pass
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(tmp_path, target)
+    except OSError as exc:
+        if tmp_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                tmp_path.unlink()
+        raise RuntimeError(
+            f"Could not write Omnigent Qwen system settings at {target}: {exc}"
+        ) from exc
+    return target
 
 
 def _inline_text_file_data(file_data: object) -> str:
@@ -181,9 +257,9 @@ def _parse_image_data_uri(data_uri: object) -> tuple[str, str] | None:
 
 
 class QwenExecutor(Executor):
-    """Executor that drives Qwen Code via its ACP (``--acp``) mode.
+    """Executor that drives Qwen Code via its experimental ACP mode.
 
-    Spawns a ``qwen --acp`` subprocess and manages sessions through the
+    Spawns a ``qwen --experimental-acp`` subprocess and manages sessions through the
     ACP JSON-RPC 2.0 protocol over newline-delimited stdin/stdout.
     """
 
@@ -195,6 +271,7 @@ class QwenExecutor(Executor):
         qwen_path: str | None = None,
         gateway_base_url: str | None = None,
         gateway_auth_command: str | None = None,
+        ollama: bool = False,
     ) -> None:
         """Initialize the Qwen executor.
 
@@ -218,6 +295,8 @@ class QwenExecutor(Executor):
         :param gateway_auth_command: Shell command that prints a bearer token to
             stdout (from ``HARNESS_QWEN_GATEWAY_AUTH_COMMAND``); run once at
             process start to snapshot ``OPENAI_API_KEY``.
+        :param ollama: Whether the routed provider is Ollama and must pass
+            endpoint and model readiness before launch.
         """
         self._cwd = cwd or os.getcwd()
         self._os_env = os_env
@@ -238,6 +317,8 @@ class QwenExecutor(Executor):
         self._qwen_path = qwen_path or "qwen"
         self._gateway_base_url = gateway_base_url
         self._gateway_auth_command = gateway_auth_command
+        self._ollama = ollama
+        self._system_settings_path: Path | None = None
 
         # Asyncio subprocess (created on first run_turn call).
         self._proc: asyncio.subprocess.Process | None = None
@@ -262,6 +343,8 @@ class QwenExecutor(Executor):
 
         # Whether initialize has been sent already.
         self._initialized: bool = False
+        # Qwen Code 0.0.6 implements the pre-session ACP 0.0.9 vocabulary.
+        self._legacy_acp: bool = False
 
         # Whether qwen accepts ``image`` prompt blocks, learned from the
         # ``initialize`` handshake (``agentCapabilities.promptCapabilities.image``).
@@ -302,7 +385,7 @@ class QwenExecutor(Executor):
     # ------------------------------------------------------------------
 
     async def _start_process(self) -> None:
-        """Start ``qwen --acp`` as an asyncio subprocess.
+        """Start ``qwen --experimental-acp`` as an asyncio subprocess.
 
         The StreamReader limit is set to 16 MiB so that qwen's large
         ``session/new`` responses (which can list dozens of available
@@ -315,6 +398,7 @@ class QwenExecutor(Executor):
         # reject the subsequent ``session/new``. ``_image_supported`` is
         # derived from the initialize response, so it's stale too.
         self._initialized = False
+        self._legacy_acp = False
         self._image_supported = False
         env = await self._build_spawn_env()
         # Resolve the path to spawn: the bare qwen binary, or a sandbox launcher
@@ -324,7 +408,7 @@ class QwenExecutor(Executor):
         _STREAM_LIMIT = 16 * 1024 * 1024
         self._proc = await asyncio.create_subprocess_exec(
             launch_path,
-            "--acp",
+            _QWEN_ACP_FLAG,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -378,7 +462,11 @@ class QwenExecutor(Executor):
             # and write its config dir (~/.qwen) and /tmp, or it can't start
             # inside the jail.
             qwen_dir = Path(self._qwen_path).resolve().parent.parent
-            sandbox = with_additional_read_roots(sandbox, [qwen_dir])
+            read_roots = [qwen_dir]
+            system_settings_path = getattr(self, "_system_settings_path", None)
+            if system_settings_path is not None:
+                read_roots.append(system_settings_path)
+            sandbox = with_additional_read_roots(sandbox, read_roots)
             sandbox = with_additional_write_roots(sandbox, [Path.home() / ".qwen", Path("/tmp")])
             sandbox = with_spawn_env_allowlist(sandbox, spawn_env_names)
             return create_exec_launcher(self._qwen_path, sandbox)
@@ -402,8 +490,47 @@ class QwenExecutor(Executor):
             allow_prefixes=("QWEN_", "OPENAI_", "DASHSCOPE_"),
             extra_allowed=declared_passthrough(self._os_env),
         )
-        env.update(await self._resolve_gateway_env())
+        gateway_env = await self._resolve_gateway_env()
+        if getattr(self, "_ollama", False):
+            if not gateway_env:
+                raise RuntimeError(
+                    "The local Qwen route is incomplete; configure OPENAI_BASE_URL, "
+                    "OPENAI_API_KEY, and OPENAI_MODEL before launching "
+                    "qwen --experimental-acp."
+                )
+            if "OPENAI_MODEL" not in gateway_env:
+                raise RuntimeError(
+                    "The local Qwen route is missing OPENAI_MODEL; pin a model to prevent "
+                    "Qwen Code from falling back to qwen3-coder-plus."
+                )
+            await self._check_local_ollama_readiness(
+                gateway_env["OPENAI_BASE_URL"], gateway_env["OPENAI_MODEL"]
+            )
+        if gateway_env:
+            self._system_settings_path = _materialize_qwen_system_settings()
+            gateway_env[_QWEN_SYSTEM_SETTINGS_ENV] = str(self._system_settings_path)
+        env.update(gateway_env)
         return env
+
+    async def _check_local_ollama_readiness(self, base_url: str, model: str) -> None:
+        """Fail before Qwen launch when local Ollama or its pinned model is absent."""
+        endpoint = urlsplit(base_url).netloc or base_url
+        try:
+            models = await asyncio.to_thread(
+                _fetch_ollama_models,
+                base_url,
+                _OLLAMA_READINESS_TIMEOUT_SECONDS,
+            )
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"Ollama is unavailable at {endpoint}. Start Ollama, verify the local "
+                f"endpoint, then retry. ({exc})"
+            ) from exc
+        if model not in models:
+            raise RuntimeError(
+                f"Ollama does not have the configured model {model!r}. "
+                f"Run `ollama pull {model}`, then retry."
+            )
 
     async def _resolve_gateway_env(self) -> dict[str, str]:
         """Build the OpenAI-compatible env qwen reads from the gateway config.
@@ -616,9 +743,12 @@ class QwenExecutor(Executor):
             raise RuntimeError(
                 f"qwen ACP initialize failed: {resp['error'].get('message', resp['error'])}"
             )
-        prompt_caps = (
-            (resp.get("result") or {}).get("agentCapabilities", {}).get("promptCapabilities", {})
+        result = resp.get("result") or {}
+        protocol_version = result.get("protocolVersion")
+        self._legacy_acp = isinstance(protocol_version, str) and protocol_version.startswith(
+            "0.0."
         )
+        prompt_caps = result.get("agentCapabilities", {}).get("promptCapabilities", {})
         self._image_supported = bool(prompt_caps.get("image"))
         self._initialized = True
 
@@ -628,6 +758,9 @@ class QwenExecutor(Executor):
         :returns: The session id string assigned by qwen.
         """
         if self._session_id is not None:
+            return self._session_id
+        if self._legacy_acp:
+            self._session_id = "legacy"
             return self._session_id
 
         mcp_servers = self._mcp.session_new_servers(
@@ -1100,7 +1233,7 @@ class QwenExecutor(Executor):
         The harness adapter passes a content **list** (rather than a plain
         string) whenever a message carries a non-text block — e.g. a file
         attachment becomes ``[{"type": "input_text", …}, {"type":
-        "input_file", …}]``. ACP's ``session/prompt`` is text-only, so we
+        "input_file", …}]``. ACP's prompt transport is text-only, so we
         fold each block into text:
 
         - ``input_text`` / ``output_text`` / ``text`` → the text verbatim.
@@ -1168,7 +1301,7 @@ class QwenExecutor(Executor):
         """Serialize prior conversation turns into a text prefix.
 
         On a *fresh* ACP session (the first turn of a newly spawned/respawned
-        ``qwen --acp`` process, or after a ``Session not found`` reset) qwen
+        ``qwen --experimental-acp`` process, or after a ``Session not found`` reset) qwen
         holds none of the earlier conversation — its context lived in the dead
         subprocess. Since :meth:`run_turn` normally sends only the latest user
         turn (relying on the persistent session to retain history), we'd lose
@@ -1219,9 +1352,8 @@ class QwenExecutor(Executor):
     ) -> AsyncIterator[ExecutorEvent]:
         """Run one turn of the Qwen agent loop via ACP.
 
-        Sends a ``session/prompt`` request and yields events until the
-        turn completes (``stopReason`` present in the response) or an
-        error occurs.
+        Sends ``session/prompt`` (modern ACP) or ``sendUserMessage`` (legacy
+        ACP 0.0.9) and yields events until the response completes or errors.
 
         :param messages: Conversation history.
         :param tools: Tool specs (not passed directly to Qwen; Qwen uses
@@ -1321,15 +1453,23 @@ class QwenExecutor(Executor):
         fut: asyncio.Future[_AcpJsonObject] = loop.create_future()
         self._pending[req_id] = fut
 
-        prompt_request: _AcpJsonObject = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": _AGENT_METHOD_SESSION_PROMPT,
-            "params": {
-                "sessionId": session_id,
-                "prompt": prompt_blocks,
-            },
-        }
+        if self._legacy_acp:
+            prompt_request: _AcpJsonObject = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": _LEGACY_AGENT_METHOD_SEND_USER_MESSAGE,
+                "params": {"chunks": [{"text": user_text}]},
+            }
+        else:
+            prompt_request = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": _AGENT_METHOD_SESSION_PROMPT,
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": prompt_blocks,
+                },
+            }
         await self._send(prompt_request)
 
         # Idle-based deadline: reset on every inbound message (bottom of loop),
@@ -1392,7 +1532,22 @@ class QwenExecutor(Executor):
             method = notification.get("method", "")
             params = notification.get("params", {})
 
-            if method == _CLIENT_NOTIFICATION_SESSION_UPDATE:
+            if self._legacy_acp and method == _LEGACY_CLIENT_REQUEST_STREAM_CHUNK:
+                chunk = params.get("chunk", {})
+                text = chunk.get("text", "") if isinstance(chunk, dict) else ""
+                if text:
+                    accumulated_text.append(text)
+                    yield TextChunk(text=text)
+                if notification.get("id") is not None:
+                    await self._send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": notification["id"],
+                            "result": None,
+                        }
+                    )
+
+            elif method == _CLIENT_NOTIFICATION_SESSION_UPDATE:
                 update = params.get("update", {})
                 update_type = update.get("sessionUpdate", "")
 
