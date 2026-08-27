@@ -21,6 +21,7 @@ const KIMI_LOCK_STALE_MS = 5_000;
 const KIMI_LOCK_UPDATE_MS = KIMI_LOCK_STALE_MS / 2;
 const KIMI_LOCK_RETRY_MS = 500;
 const KIMI_LOCK_RETRY_COUNT = 120;
+const DIAGNOSTICS_ENABLED = process.env.OMNIGENT_FORKED_UI_DIAG === "1";
 const USER_HOME = homedir();
 const RATELIMITS_FILE = path.join(USER_HOME, ".claude", "statusline-ratelimits.json");
 const KIMI_CREDENTIALS_FILE = path.join(
@@ -107,6 +108,25 @@ function sendMetricsError(response) {
     Connection: "close",
   });
   response.end(body);
+}
+
+function receiveClientError(request, response) {
+  const chunks = [];
+  let size = 0;
+  request.on("data", (chunk) => {
+    size += chunk.length;
+    if (size <= 16_384) chunks.push(chunk);
+  });
+  request.on("end", () => {
+    const body = Buffer.concat(chunks).toString("utf8");
+    console.error(`[client-error] ${redactProviderSecrets(body)}`);
+    response.writeHead(204, { "Cache-Control": "no-store" });
+    response.end();
+  });
+  request.on("error", (error) => {
+    logError("client error report failed", error);
+    sendText(response, 400, "Bad Request\n");
+  });
 }
 
 function serveStatuslineMetrics(request, response) {
@@ -724,6 +744,26 @@ async function resolveStaticFile(pathname) {
     }
   }
 
+  // A MISSING BUILD ASSET IS A 404, NOT THE SPA SHELL. Everything under
+  // /assets/ is an immutable, content-hashed build output; it is never a
+  // client-side route. Falling back to index.html there answers a JS module
+  // request with `200 text/html`, which the browser reports only as the
+  // opaque "Failed to fetch dynamically imported module" -- the app white-
+  // screens and nothing in the response says why.
+  //
+  // This is how a deploy breaks an ALREADY-OPEN tab: the running app asks for
+  // a lazy chunk whose hash the new build deleted, gets HTML with a 200, and
+  // dies. Measured 2026-08-25 on a phone against a removed
+  // `highlighted-body-OFNGDK62-BIxezyWH.js`, and reproduced here 2026-08-27:
+  // an invented asset path returned `http=200 type=text/html size=4532`.
+  // A real 404 is both honest and recoverable -- caches and service workers
+  // treat it correctly, and a chunk-error boundary can act on it.
+  if (decodedPath.startsWith("/assets/")) {
+    const error = new Error(`build asset not found: ${decodedPath}`);
+    error.statusCode = 404;
+    throw error;
+  }
+
   return INDEX_FILE;
 }
 
@@ -776,6 +816,16 @@ async function handleHttpRequest(request, response) {
     return;
   }
 
+  if (DIAGNOSTICS_ENABLED) {
+    const source = request.headers["cf-connecting-ip"] ? "TUNNEL" : "local";
+    const userAgent = String(request.headers["user-agent"] ?? "unknown")
+      .replace(/\s+/g, " ")
+      .slice(0, 180);
+    console.log(
+      `[request] ${source} ${request.method ?? "UNKNOWN"} ${parsed.pathname} ua=${userAgent}`,
+    );
+  }
+
   if (isProxyPath(parsed.pathname)) {
     proxyHttpRequest(request, response, `${parsed.pathname}${parsed.search}`);
     return;
@@ -791,12 +841,19 @@ async function handleHttpRequest(request, response) {
     return;
   }
 
+  if (request.method === "POST" && parsed.pathname === "/__client-error") {
+    receiveClientError(request, response);
+    return;
+  }
+
   try {
     await serveStaticRequest(request, response, parsed.pathname);
   } catch (error) {
     const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
     logError("static request failed", error);
-    sendText(response, statusCode, statusCode === 400 ? "Bad Request\n" : "Internal Server Error\n");
+    const statusText =
+      statusCode === 400 ? "Bad Request\n" : statusCode === 404 ? "Not Found\n" : "Internal Server Error\n";
+    sendText(response, statusCode, statusText);
   }
 }
 
