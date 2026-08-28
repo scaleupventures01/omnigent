@@ -52,7 +52,23 @@ const FILE_PATH_TOOLS = new Set(["sys_os_read", "sys_os_write", "sys_os_edit"]);
  * `<pre>`, so a compact one-line JSON payload otherwise becomes a single
  * horizontal-scrolling line.
  */
-function prettyPrintIfJson(s: string): string {
+/**
+ * Above this, tool output is handed through unformatted.
+ *
+ * Re-formatting costs a full `JSON.parse` plus a re-`stringify` WITH
+ * indentation (which grows the string), it runs at mount for every tool card
+ * on the main thread, and the result is then cut to
+ * `OUTPUT_PREVIEW_CHAR_LIMIT` (12k) anyway — so above this size every byte of
+ * that work is discarded. Measured 2026-08-27 against the live store: 1,128
+ * stored outputs exceed 100KB, averaging 377KB, with a 1.5MB maximum; the
+ * worst single conversation page carries 4.8MB across 100 items.
+ */
+const PRETTY_PRINT_MAX_CHARS = 100_000;
+
+export function prettyPrintIfJson(s: string): string {
+  if (s.length > PRETTY_PRINT_MAX_CHARS) {
+    return s;
+  }
   try {
     const parsed: unknown = JSON.parse(s);
     return JSON.stringify(parsed, null, 2);

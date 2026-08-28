@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FileViewerContext } from "@/shell/FileViewerContext";
 import type { RenderItem } from "@/lib/renderItems";
-import { ToolCard, ToolGroupSummary, formatToolDuration, getOutputPreview } from "./ToolCard";
+import { ToolCard, ToolGroupSummary, formatToolDuration, getOutputPreview, prettyPrintIfJson } from "./ToolCard";
 
 afterEach(cleanup);
 
@@ -255,5 +255,28 @@ describe("ToolGroupSummary", () => {
       ),
     );
     expect(screen.getByText("Ran 1 shell command, read 2 files")).toBeInTheDocument();
+  });
+});
+
+describe("prettyPrintIfJson size guard", () => {
+  // Negative case first: if the guard were wrong (always returning input),
+  // this fails — so it proves formatting is still alive for normal output.
+  it("still formats normal JSON output", () => {
+    const small = JSON.stringify({ a: 1, b: [2, 3] });
+    const out = prettyPrintIfJson(small);
+    expect(out).toContain("\n");
+    expect(out).not.toBe(small);
+  });
+
+  it("hands back oversized JSON untouched instead of re-serializing megabytes", () => {
+    const big = JSON.stringify({ rows: Array.from({ length: 20_000 }, (_, i) => `row-${i}`) });
+    expect(big.length).toBeGreaterThan(100_000);
+    expect(prettyPrintIfJson(big)).toBe(big);
+  });
+
+  it("leaves non-JSON output alone at both sizes", () => {
+    expect(prettyPrintIfJson("plain text")).toBe("plain text");
+    const bigText = "x".repeat(200_000);
+    expect(prettyPrintIfJson(bigText)).toBe(bigText);
   });
 });
