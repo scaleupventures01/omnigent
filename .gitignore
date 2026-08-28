@@ -86,3 +86,7 @@ omnigent/server/static/web-ui/
 # DAB local state directory (created by `databricks bundle deploy`).
 deploy/databricks/.databricks/
 web/package-lock.json
+
+# Backup copies of the built UI taken before a rebuild -- never commit these.
+# 2026-08-27: a `git add -A` swept 485 such files (26MB) into a commit.
+omnigent/server/static/web-ui.*/
