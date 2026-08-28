@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from omnigent.entities import Conversation
@@ -264,6 +266,48 @@ async def test_runner_router_resources_reuses_preloaded_conversation() -> None:
         )
 
         assert routed.runner_id == "runner_one"
+    finally:
+        await router.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_router_resources_waits_for_bound_runner_to_connect() -> None:
+    """A resource request racing runner startup waits instead of returning offline."""
+    registry = TunnelRegistry()
+    conversation = _conversation(runner_id="runner_starting")
+    store = _ConversationStore({"conv_test": conversation})
+    router = RunnerRouter(registry=registry, conversation_store=store)  # type: ignore[arg-type]
+
+    async def _connect() -> None:
+        await asyncio.sleep(0.01)
+        registry.register(
+            "runner_starting",
+            _FakeWebSocket(),
+            _hello(harnesses=["codex"]),
+        )
+
+    connect_task = asyncio.create_task(_connect())
+    try:
+        routed = await router.wait_for_session_resources(
+            "conv_test",
+            timeout_s=0.5,
+        )
+        assert routed.runner_id == "runner_starting"
+    finally:
+        await connect_task
+        await router.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_router_resources_still_rejects_offline_runner_after_grace() -> None:
+    """Negative control: a runner that never connects still returns unavailable."""
+    registry = TunnelRegistry()
+    store = _ConversationStore({"conv_test": _conversation(runner_id="runner_missing")})
+    router = RunnerRouter(registry=registry, conversation_store=store)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(OmnigentError) as excinfo:
+            await router.wait_for_session_resources("conv_test", timeout_s=0.01)
+        _assert_omnigent_error(excinfo, code=ErrorCode.RUNNER_UNAVAILABLE)
     finally:
         await router.aclose()
 

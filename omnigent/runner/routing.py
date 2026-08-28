@@ -185,6 +185,49 @@ class RunnerRouter:
             code=ErrorCode.CONFLICT,
         )
 
+    async def wait_for_session_resources(
+        self,
+        conversation_id: str,
+        *,
+        conversation: Conversation | None = None,
+        timeout_s: float,
+    ) -> RoutedRunner:
+        """Resolve a resource client after a short runner-connect grace.
+
+        Session creation binds the runner id before its WebSocket hello can
+        reach the registry. Resource requests issued in that window should
+        rendezvous with the connection instead of flashing a false 503.
+        """
+        conv = conversation
+        if conv is not None and conv.id != conversation_id:
+            raise ValueError(
+                f"conversation id mismatch: expected {conversation_id!r}, got {conv.id!r}"
+            )
+        if conv is None:
+            conv = self._conversation_store.get_conversation(conversation_id)
+        if conv is None:
+            raise OmnigentError("conversation not found", code=ErrorCode.NOT_FOUND)
+        if not conv.runner_id:
+            raise OmnigentError(
+                f"conversation {conversation_id!r} is not bound to a runner; "
+                "resume the session to bind a registered runner",
+                code=ErrorCode.CONFLICT,
+            )
+
+        absent_code = self._runner_absent_code(conv.host_id)
+        session = self._registry.get(conv.runner_id)
+        if session is None and absent_code == ErrorCode.RUNNER_UNAVAILABLE:
+            session = await self._registry.wait_for_runner(conv.runner_id, timeout_s=timeout_s)
+        if session is None:
+            raise OmnigentError(
+                f"runner {conv.runner_id!r} is offline for conversation {conversation_id!r}",
+                code=absent_code,
+            )
+        return RoutedRunner(
+            runner_id=conv.runner_id,
+            client=self._client_for_runner(conv.runner_id),
+        )
+
     def client_for_existing_conversation(self, conversation_id: str) -> RoutedRunner | None:
         """
         Return the pinned runner client for an already-started conversation.

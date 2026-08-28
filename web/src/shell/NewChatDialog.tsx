@@ -2054,16 +2054,19 @@ export function NewChatLandingScreen() {
   // Project driving this visit, when the sidebar's per-project "new session"
   // pencil landed here with a `?project=` query param. Empty otherwise.
   const projectParam = searchParams.get("project") ?? "";
+  // A project-scoped entry must use its own defaults, never execution settings
+  // restored from another project's draft.
+  const executionDraft = projectParam === "" ? landingDraft : null;
   // Seeded from the persisted last pick so a returning user starts on the
   // agent they used last; validated against the live list in
   // effectiveAgentId below (a stale id falls back to the default). A
   // project-driven visit defers to the project-prefill effect instead
   // (which falls back to the same last pick).
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
-    () => landingDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
+    () => executionDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
   );
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
-    () => landingDraft?.selectedHostId ?? null,
+    () => executionDraft?.selectedHostId ?? null,
   );
   // Sessions on the selected host — fetched only when a host is selected,
   // to avoid registering hundreds of sessions into the health poll at idle.
@@ -2072,7 +2075,7 @@ export function NewChatLandingScreen() {
   // host — the server provisions a sandbox host at create time
   // (host_type: "managed"), so no host_id or workspace is sent.
   const [sandboxSelected, setSandboxSelected] = useState(
-    () => landingDraft?.sandboxSelected ?? false,
+    () => executionDraft?.sandboxSelected ?? false,
   );
   // Provider the sandbox pick launches on. Seeded to the sticky last pick (or
   // the first offered row) once the picker rows load; null both before that
@@ -2119,13 +2122,13 @@ export function NewChatLandingScreen() {
   // `workspace` string (`<url>[#<branch>]`); both blank = empty
   // server-created workspace.
   const [sandboxRepoUrl, setSandboxRepoUrl] = useState<string>(
-    () => landingDraft?.sandboxRepoUrl ?? "",
+    () => executionDraft?.sandboxRepoUrl ?? "",
   );
   const [sandboxRepoBranch, setSandboxRepoBranch] = useState<string>(
-    () => landingDraft?.sandboxRepoBranch ?? "",
+    () => executionDraft?.sandboxRepoBranch ?? "",
   );
-  const [workspace, setWorkspace] = useState<string>(() => landingDraft?.workspace ?? "");
-  const [branchName, setBranchName] = useState<string>(() => landingDraft?.branchName ?? "");
+  const [workspace, setWorkspace] = useState<string>(() => executionDraft?.workspace ?? "");
+  const [branchName, setBranchName] = useState<string>(() => executionDraft?.branchName ?? "");
   // The base branch auto-fills from the configured default (Settings › Git)
   // when the user names a worktree branch, and is left alone once the user
   // touches it — clearing the branch name re-arms the auto-fill (see the effect
@@ -2142,7 +2145,7 @@ export function NewChatLandingScreen() {
   // that worktree (no git opts). Editing the field away from it means the user
   // wants a *new* worktree off that name.
   const [prefilledBranch, setPrefilledBranch] = useState<string>(
-    () => landingDraft?.prefilledBranch ?? "",
+    () => executionDraft?.prefilledBranch ?? "",
   );
   // Project to file the new session under. Empty = unfiled. Stamped as the
   // `omni_project` label at create (so the row is filed from its first sidebar
@@ -2191,8 +2194,8 @@ export function NewChatLandingScreen() {
   // switch, seeded from the user's last stored pick for that agent.
   const [pickedHarness, setPickedHarness] = useState<string | null>(
     () =>
-      landingDraft?.pickedHarness ??
-      readLastHarness(landingDraft?.pickedAgentId ?? readLastAgentId()),
+      executionDraft?.pickedHarness ??
+      readLastHarness(executionDraft?.pickedAgentId ?? readLastAgentId()),
   );
   // Per-session model + reasoning effort for the claude-native model picker.
   // "" = unselected: nothing is checked and `model_override` / `reasoning_effort`
@@ -2336,7 +2339,7 @@ export function NewChatLandingScreen() {
   // Normalize into the machine's shape. `undefined` = still loading (the machine
   // waits so a generic default can't win the race); `{}` = nothing to wait for
   // (plain visit / label-only folder / genuinely empty config), so it settles
-  // immediately and the generic defaults take over.
+  // immediately. Project workspaces still remain blank unless configured.
   const prefillConfig = useMemo<ProjectPrefillConfig | undefined>(() => {
     // A project-scoped visit must resolve name → id via the projects list
     // before we know whether there's a config to read — until it loads, the id
@@ -2485,7 +2488,7 @@ export function NewChatLandingScreen() {
   // the working-directory field is pre-filled and the user can send in one
   // click. Derived from the same home listing the picker uses (entries carry
   // absolute paths); only fetched when there's no recent to fall back to.
-  const needsHomeFallback = selectedHostId !== null && recent.length === 0;
+  const needsHomeFallback = projectParam === "" && selectedHostId !== null && recent.length === 0;
   const { data: homeListing, isPlaceholderData: homeListingIsPlaceholder } = useHostFilesystem(
     selectedHostId,
     needsHomeFallback ? "" : null,
@@ -2516,7 +2519,12 @@ export function NewChatLandingScreen() {
   // The path the once-per-host auto-seed WOULD land on: the most-recent path,
   // else the derived home. Exposed as a memo so we can probe its repo for
   // worktrees before committing to it (see the fork-fresh redirect below).
-  const autoSeedCandidate = useMemo(() => recent[0] ?? derivedHome ?? null, [recent, derivedHome]);
+  // Project composers without a configured workspace stay blank. This makes a
+  // new project fail safe instead of borrowing the last project's directory.
+  const autoSeedCandidate = useMemo(
+    () => (projectParam === "" ? (recent[0] ?? derivedHome ?? null) : null),
+    [projectParam, recent, derivedHome],
+  );
   // "Fork fresh from default": when the project defines a default base branch,
   // a fresh new-chat must NOT silently continue in the last-used worktree — it
   // should fork a new branch off that default. The auto-seed can land on a
@@ -2568,10 +2576,8 @@ export function NewChatLandingScreen() {
     autoSeedCandidate,
   ]);
 
-  // Seed the working directory once per host, into an empty field only, so an
-  // explicit pick isn't clobbered. Prefer the most-recent path; else the
-  // derived home (which can arrive a render later, hence the dep). Holds
-  // off while a project prefill is deciding on a workspace of its own.
+  // Seed the plain composer once per host from recents or home. Project
+  // composers only accept their configured workspace or an explicit pick.
   useEffect(() => {
     if (!prefillSettled) return;
     if (selectedHostId === null) return;
@@ -3068,7 +3074,11 @@ export function NewChatLandingScreen() {
   // worktree picker. Skipped for sandbox sessions (server-managed) and
   // when no directory is picked. A non-git path resolves to [].
   const worktreesEnabled = !sandboxSelected && selectedHostId !== null && workspaceTrimmed !== "";
-  const { data: hostWorktrees, isPlaceholderData: hostWorktreesArePlaceholder } = useHostWorktrees(
+  const {
+    data: hostWorktrees,
+    isPlaceholderData: hostWorktreesArePlaceholder,
+    isError: hostWorktreesError,
+  } = useHostWorktrees(
     worktreesEnabled ? selectedHostId : null,
     worktreesEnabled ? workspaceTrimmed : null,
   );
@@ -3188,13 +3198,8 @@ export function NewChatLandingScreen() {
     defaultSandboxProvider,
   ]);
 
-  // Opt-in worktree from the project's stored config. The inference machine
-  // settles a config-driven location without touching the branch, so this
-  // effect creates the fresh worktree once the workspace is fully in place —
-  // whether it came from the config's own workspace or the composer's
-  // home-fallback (which runs after the machine settles). Fires at most once
-  // per settled workspace (ref-guarded) and only into an empty branch, so a
-  // typed branch / existing-worktree prefill is never clobbered.
+  // Opt-in worktree from the project's stored config. Once its workspace is
+  // ready, create a branch only if the user has not already chosen one.
   useEffect(() => {
     if (prefillConfig?.useWorktree !== true) return;
     if (prefill.project !== projectParam || !prefillDone(prefill)) return;
@@ -3367,10 +3372,33 @@ export function NewChatLandingScreen() {
     textareaRef,
   });
 
+  // A project that opts into worktrees must not become submittable in the
+  // render between its host/workspace prefill landing and the worktree query
+  // (and branch-seeding effect) finishing. Without this gate, a fast click can
+  // POST with `git: undefined`, silently ignoring the saved project setting.
+  // A resolved non-git directory ([]) and a failed probe retain the existing
+  // plain-workspace fallback; a real main work tree stays pending until the
+  // effect above has generated its branch name.
+  const projectWorktreePrefillPending =
+    projectParam !== "" &&
+    prefillConfig?.useWorktree === true &&
+    prefill.project === projectParam &&
+    prefillDone(prefill) &&
+    !sandboxSelected &&
+    selectedHostId !== null &&
+    workspaceTrimmed !== "" &&
+    branchName === "" &&
+    prefilledBranch === "" &&
+    !hostWorktreesError &&
+    (hostWorktrees === undefined ||
+      hostWorktreesArePlaceholder ||
+      hostWorktrees.some((worktree) => worktree.is_main));
+
   const canSubmit =
     message.trim().length > 0 &&
     selectedAgent != null &&
     (sandboxSelected ? sandboxRepoValid : !!selectedHostId && workspaceValid) &&
+    !projectWorktreePrefillPending &&
     !creating;
 
   // Why submit is disabled, surfaced as the button's tooltip. Checked in the
@@ -3383,9 +3411,11 @@ export function NewChatLandingScreen() {
       ? "Please enter a valid repository URL"
       : !sandboxSelected && (!selectedHostId || !workspaceValid)
         ? "Please choose a host and working directory"
-        : message.trim().length === 0
-          ? "Enter a message to get started"
-          : null;
+        : projectWorktreePrefillPending
+          ? "Preparing the project worktree"
+          : message.trim().length === 0
+            ? "Enter a message to get started"
+            : null;
 
   // Chip display labels.
   const workspaceLabel = workspaceTrimmed

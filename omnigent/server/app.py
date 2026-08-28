@@ -400,8 +400,9 @@ def _ensure_builtin_agent(
       update the row in place (keeps the ``agent_id`` stable so task
       history isn't cascade-deleted; bumps ``version`` so the runner's
       version-keyed spec cache re-fetches), then warm-swap the cache.
-    - **Row exists, content hash matches** → evict the local cache so
-      the next load re-fetches from ``bundle_location``, then return.
+    - **Row exists, content hash matches** → restore the content-addressed
+      artifact when it is missing, evict the local cache so the next load
+      re-fetches from ``bundle_location``, then return.
 
     The evict on the matching-hash path matters because
     :meth:`AgentCache.load` is keyed by ``agent_id`` and trusts its
@@ -432,6 +433,20 @@ def _ensure_builtin_agent(
         # Sha-segment compare: legacy rows keep an ``ag_``-prefixed left
         # segment (physical artifact key); only the sha encodes content.
         if existing.bundle_location.rsplit("/", 1)[-1] == bundle_hash:
+            # The DB row and content hash can survive while the local artifact
+            # directory is lost or only partially restored.  A picker card is
+            # still returned in that state, but create-session fails later with
+            # KeyError(bundle_location) while validating the workspace.  Seed
+            # the immutable blob again before evicting the cache so startup is
+            # self-healing rather than advertising an unloadable built-in.
+            if not artifact_store.exists(existing.bundle_location):
+                artifact_store.put(existing.bundle_location, bundle_bytes)
+                _logger.warning(
+                    "Restored missing bundle for built-in %s agent %s at %s",
+                    name,
+                    existing.id,
+                    existing.bundle_location,
+                )
             # Row current; evict so a lagging replica's stale cache reloads the bundle.
             agent_cache.evict(existing.id)
             return

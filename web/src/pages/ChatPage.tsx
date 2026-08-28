@@ -4386,9 +4386,11 @@ function ComposerStatusLine({
   const statuslineUpdated =
     statusline?.updated ??
     (finiteStatusNumber(statusline?.capturedAtMs) ? statusline.capturedAtMs / 1000 : undefined);
-  const stale =
-    !finiteStatusNumber(statuslineUpdated) || now / 1000 - statuslineUpdated > 1800;
-  const cashClass = stale
+  // Business metrics refresh hourly; provider limits manage their own
+  // freshness and must retain their individual severity colors.
+  const bizStale =
+    !finiteStatusNumber(statuslineUpdated) || now / 1000 - statuslineUpdated > 7200;
+  const cashClass = bizStale
     ? "text-muted-foreground"
     : !finiteStatusNumber(cashValue)
       ? "text-muted-foreground"
@@ -4463,17 +4465,28 @@ function ComposerStatusLine({
     <span key="cash" className={cn("flex-none whitespace-nowrap", cashClass)}>
       Cash {cashDisplay}
     </span>,
-    <span key="goal" className="flex-none whitespace-nowrap">
+    <span
+      key="goal"
+      className={cn("flex-none whitespace-nowrap", bizStale && "text-muted-foreground")}
+    >
       Goal {displayMetricPercent(goalPercent)}{" "}
-      <span className="text-green-400">{progressBar(goalPercent)}</span>{" "}
+      <span className={bizStale ? undefined : "text-green-400"}>{progressBar(goalPercent)}</span>{" "}
       {formatMoneyComma(goalRunrate)}/{formatMoneyK(goalTarget)}
     </span>,
-    <span key="nautilus" className="flex-none whitespace-nowrap">
+    <span
+      key="nautilus"
+      className={cn("flex-none whitespace-nowrap", bizStale && "text-muted-foreground")}
+    >
       {nautilusLabel}
     </span>,
-    <span key="pipeline" className="flex-none whitespace-nowrap">
+    <span
+      key="pipeline"
+      className={cn("flex-none whitespace-nowrap", bizStale && "text-muted-foreground")}
+    >
       Pipeline {displayMetricPercent(pipelinePercent)}{" "}
-      <span className="text-yellow-400">{progressBar(pipelinePercent)}</span>{" "}
+      <span className={bizStale ? undefined : "text-yellow-400"}>
+        {progressBar(pipelinePercent)}
+      </span>{" "}
       {formatMoneyK(qualifiedPipeline)}/
       {formatMoneyK(pipelineTarget)}
     </span>,
@@ -4524,10 +4537,7 @@ function ComposerStatusLine({
       {showMetrics && (
         <div
           data-testid="omni-metrics"
-          className={cn(
-            "flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm font-normal",
-            stale ? "text-muted-foreground [&_*]:!text-muted-foreground" : "text-foreground",
-          )}
+          className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm font-normal text-foreground"
         >
           {metricSegments}
         </div>

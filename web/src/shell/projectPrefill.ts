@@ -5,15 +5,13 @@ type ProjectPrefillPhase = "location" | "settled";
 
 /**
  * A project's stored session defaults, as the composer consumes them. This is
- * the ONLY project-driven prefill source: a set field seeds the composer, and
- * an absent field falls through to the composer's generic defaults (last host /
- * recent workspace / last-used agent).
+ * the ONLY project-driven prefill source. Host and agent can fall through to
+ * generic defaults; an absent workspace stays blank for an explicit pick.
  *
  * `undefined` means the config is still loading for a project that has one — the
  * machine WAITS in that case so a generic default can't win the race. Pass an
  * empty object `{}` for "no config / nothing to wait for" (a label-only folder
- * with no first-class row, or a genuinely empty config) so the machine settles
- * immediately and the generic defaults take over.
+ * with no first-class row, or a genuinely empty config).
  */
 export interface ProjectPrefillConfig {
   hostId?: string;
@@ -61,8 +59,8 @@ interface ProjectPrefillInputs {
   /** Last-used agent id from localStorage (readLastAgentId()) — the generic
    *  agent fallback when the config sets none. */
   lastAgentId: string | null;
-  /** Stored project defaults (the prefill source). undefined = still loading
-   *  (wait); {} = no config / nothing to wait for (settle to generic defaults). */
+  /** Stored project defaults (the prefill source). undefined = still loading;
+   *  {} = no config / nothing to wait for. */
   config: ProjectPrefillConfig | undefined;
 }
 
@@ -155,10 +153,8 @@ function locationStep(
     (selectedHostId === null || selectedHostId === config!.hostId);
   if (configHostUsable) {
     writes.hostId = config!.hostId;
-    // A configured workspace seeds the field; without one, the composer's
-    // home-fallback fills it. Any opt-in worktree (config.useWorktree) is
-    // handled by a dedicated post-settle effect once the workspace is in place
-    // (see NewChatDialog's worktree effect).
+    // A configured workspace seeds the field. Without one, the project
+    // composer requires an explicit pick.
     if (config!.workspace != null) writes.workspace = config!.workspace;
   }
   return settled(state);

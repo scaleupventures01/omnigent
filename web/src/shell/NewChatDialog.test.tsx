@@ -40,6 +40,7 @@ import { useAvailableAgents, type AvailableAgent } from "@/hooks/useAvailableAge
 import { useHostFilesystem, type HostFilesystemEntry } from "@/hooks/useHostFilesystem";
 import { useHostWorktrees } from "@/hooks/useHostWorktrees";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
+import { useProjectConfig, useProjects } from "@/hooks/useConversations";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
 import type { Conversation } from "@/hooks/useConversations";
 import { setOmnigentHostConfig } from "@/lib/host";
@@ -95,9 +96,8 @@ vi.mock("@/hooks/RunnerHealthProvider", () => ({
 // the create-POST call-count / call-order assertions below).
 vi.mock("@/hooks/useConversations", async (importOriginal) => ({
   ...(await importOriginal<typeof UseConversationsModule>()),
-  // Empty projects list → no ?project= name resolves to an id, so the project
-  // prefill stays inert and the generic host/workspace defaults under test apply.
-  useProjects: () => ({ data: [] }),
+  useProjects: vi.fn(),
+  useProjectConfig: vi.fn(),
 }));
 // The harness-label catalog is not under test here. Keep it synchronous so
 // create-session fetch assertions only observe the POST/PATCH calls they own.
@@ -171,6 +171,8 @@ const useAvailableAgentsMock = vi.mocked(useAvailableAgents);
 const useHostFilesystemMock = vi.mocked(useHostFilesystem);
 const useHostWorktreesMock = vi.mocked(useHostWorktrees);
 const useDirectorySessionsMock = vi.mocked(useDirectorySessions);
+const useProjectsMock = vi.mocked(useProjects);
+const useProjectConfigMock = vi.mocked(useProjectConfig);
 const useRunnerHealthMock = vi.mocked(useRunnerHealthRegistration);
 const setPendingInitialPromptMock = vi.mocked(setPendingInitialPrompt);
 
@@ -683,6 +685,8 @@ function setupLandingMocks() {
   useHostFilesystemMock.mockReset();
   useHostWorktreesMock.mockReset();
   useDirectorySessionsMock.mockReset();
+  useProjectsMock.mockReset();
+  useProjectConfigMock.mockReset();
   useRunnerHealthMock.mockReset();
   // Reset the install hooks to their inert defaults: per-test overrides
   // (a pending install set, a callback-firing mutate) must not leak into the
@@ -712,6 +716,12 @@ function setupLandingMocks() {
   useHostWorktreesMock.mockReturnValue({
     data: undefined,
   } as unknown as ReturnType<typeof useHostWorktrees>);
+  useProjectsMock.mockReturnValue({ data: [], isLoading: false } as unknown as ReturnType<
+    typeof useProjects
+  >);
+  useProjectConfigMock.mockReturnValue({ data: undefined, isLoading: false } as ReturnType<
+    typeof useProjectConfig
+  >);
   mockHosts([host("online")]);
   useHostModelOptionsMock.mockImplementation(
     (_hostId, harness) =>
@@ -737,6 +747,17 @@ function setupLandingMocks() {
       skills: [],
     },
   ]);
+}
+
+/** Give a project-scoped composer an explicit saved folder. */
+function mockConfiguredProject(name: string, id: string): void {
+  useProjectsMock.mockReturnValue({ data: [{ id, name }], isLoading: false } as ReturnType<
+    typeof useProjects
+  >);
+  useProjectConfigMock.mockReturnValue({
+    data: { host_id: "host_1", workspace: "/Users/corey/repo" },
+    isLoading: false,
+  } as ReturnType<typeof useProjectConfig>);
 }
 
 function renderLanding(infoOverrides: Partial<ServerInfo> = {}, route = "/") {
@@ -1541,6 +1562,7 @@ describe("NewChatLandingScreen", () => {
   it("keeps footer chip labels compact, muted and truncated", async () => {
     // Land with `?project=` so the branch chip (worktree) renders alongside the
     // others for the truncate-cap assertions.
+    mockConfiguredProject("docs", "p_docs");
     renderLanding({}, "/?project=docs");
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
@@ -2223,6 +2245,7 @@ describe("NewChatLandingScreen", () => {
       } as Response)
       .mockResolvedValue({ ok: true, json: async () => ({ id: "conv_new" }) } as Response);
     const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    mockConfiguredProject("docs", "p_docs");
     // A `?project=` landing (e.g. via the sidebar's per-project pencil) names the
     // project in the hero heading rather than a tray chip.
     renderLanding({}, "/?project=docs");
@@ -2275,6 +2298,7 @@ describe("NewChatLandingScreen", () => {
         json: async () => ({ object: "list", data: [{ id: "p_sprint", name: "Sprint 42" }] }),
       } as Response)
       .mockResolvedValue({ ok: true, json: async () => ({ id: "conv_new" }) } as Response);
+    mockConfiguredProject("Sprint 42", "p_sprint");
     renderLanding({}, "/?project=Sprint%2042");
 
     await waitFor(() => expect(screen.getByText("Sprint 42")).toBeTruthy());

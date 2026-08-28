@@ -5,9 +5,9 @@
 // Notification constructor, and so the one place that calls `new
 // Notification` / `requestPermission` is small and feature-detected.
 //
-// We deliberately use the page-scoped Notification API rather than
-// ServiceWorkerRegistration.showNotification(): the service worker we register
-// is installability/update-only and intercepts nothing.
+// Prefer the page-scoped Notification API. Mobile browsers can expose that API
+// but still reject its constructor, so showNotification catches the failure
+// and no-ops instead of crashing the app.
 
 // When running inside the Electron desktop shell, notifications are routed
 // through the OS-native notification API (via the preload bridge) instead of
@@ -89,7 +89,15 @@ export function showNotification({
     return null;
   }
   if (!isNotificationSupported() || Notification.permission !== "granted") return null;
-  const notification = new Notification(title, { body, tag });
+  let notification: Notification;
+  try {
+    notification = new Notification(title, { body, tag });
+  } catch {
+    // Android and iOS browsers can report permission === "granted" while
+    // rejecting the page-scoped constructor in favor of service-worker
+    // notifications. Notifications are optional; app rendering is not.
+    return null;
+  }
   notification.onclick = () => {
     window.focus();
     onClick?.();

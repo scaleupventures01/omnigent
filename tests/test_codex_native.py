@@ -1908,9 +1908,12 @@ def test_forwarder_rotates_session_on_new_codex_thread_and_posts_to_new_session(
             "/v1/sessions/conv_old/resources/terminals/terminal_codex_main/transfer"
         ):
             return httpx.Response(200, json={"id": "terminal_codex_main"})
-        if request.method == "POST" and request.url.path == "/v1/sessions/conv_new/events":
+        if request.method == "POST" and request.url.path in {
+            "/v1/sessions/conv_new/events",
+            "/v1/sessions/conv_old/events",
+        }:
             assert isinstance(body, dict)
-            posted_events.append(("conv_new", body))
+            posted_events.append((request.url.path.split("/")[3], body))
             return httpx.Response(202, json={"queued": False})
         return httpx.Response(
             500,
@@ -2023,15 +2026,22 @@ def test_forwarder_rotates_session_on_new_codex_thread_and_posts_to_new_session(
         "/v1/sessions/conv_old/resources/terminals/terminal_codex_main/transfer",
         {"target_session_id": "conv_new"},
     ) in requests
+    old_events = [payload for session_id, payload in posted_events if session_id == "conv_old"]
+    assert [payload["type"] for payload in old_events] == [
+        "external_session_status",
+        "external_conversation_item",
+        "external_session_superseded",
+    ]
+    assert old_events[-1]["data"] == {"target_conversation_id": "conv_new"}
     assert [
         payload["data"]["status"]
-        for _, payload in posted_events
-        if payload["type"] == "external_session_status"
+        for session_id, payload in posted_events
+        if session_id == "conv_new" and payload["type"] == "external_session_status"
     ] == ["running"]
     assert [
         payload["data"]["item_data"]["content"][0]["text"]
-        for _, payload in posted_events
-        if payload["type"] == "external_conversation_item"
+        for session_id, payload in posted_events
+        if session_id == "conv_new" and payload["type"] == "external_conversation_item"
     ] == ["after clear"]
 
 
@@ -2139,6 +2149,52 @@ def test_forwarder_rotation_failure_preserves_old_target(
     assert fake_usage_coalescer.flushed
     assert not fake_delta_coalescer.closed
     assert not fake_usage_coalescer.closed
+
+
+def test_forwarder_does_not_rotate_auxiliary_thread_during_active_turn(
+    tmp_path: Path,
+) -> None:
+    """A thread announced mid-turn must not steal the live chat binding."""
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_old",
+            socket_path="ws://127.0.0.1:9876",
+            thread_id="thread_old",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id="turn_live",
+        ),
+    )
+
+    async def run() -> tuple[bool, codex_native_forwarder._ForwarderTarget]:
+        async with httpx.AsyncClient(base_url="http://127.0.0.1:8000") as client:
+            target = codex_native_forwarder._ForwarderTarget(
+                session_id="conv_old",
+                thread_id="thread_old",
+                delta_coalescer=codex_native_forwarder._OutputTextDeltaCoalescer(
+                    client, "conv_old"
+                ),
+                usage_coalescer=codex_native_forwarder._SessionUsageCoalescer(
+                    client, "conv_old"
+                ),
+                elicitation_tracker=_elicitation_tracker(),
+            )
+            rotated = await codex_native_forwarder._maybe_rotate_session_on_thread_started(
+                ap_client=client,
+                target=target,
+                bridge_dir=tmp_path,
+                app_server_url="ws://127.0.0.1:9876",
+                event=_thread_started_event("thread_auxiliary"),
+            )
+            await target.delta_coalescer.close()
+            await target.usage_coalescer.close()
+            return rotated, target
+
+    rotated, target = asyncio.run(run())
+
+    assert not rotated
+    assert target.session_id == "conv_old"
+    assert target.thread_id == "thread_old"
 
 
 @pytest.mark.parametrize(

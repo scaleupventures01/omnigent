@@ -768,6 +768,38 @@ def test_ensure_default_native_agents_is_idempotent(seed_stores: _SeedStores) ->
     assert qwen_rows[0].version == first.version == 1
 
 
+def test_ensure_default_native_agents_restores_missing_bundle(
+    seed_stores: _SeedStores,
+) -> None:
+    """A matching built-in row must not keep pointing at a missing artifact."""
+    server_app._ensure_default_native_agents(
+        seed_stores.agent_store,
+        seed_stores.artifact_store,
+        seed_stores.agent_cache,
+    )
+    first = seed_stores.agent_store.get_by_name(QWEN_NATIVE_AGENT_NAME)
+    assert first is not None
+
+    # Negative control: the row remains visible, but its bundle cannot load.
+    seed_stores.artifact_store.delete(first.bundle_location)
+    seed_stores.agent_cache.evict(first.id)
+    with pytest.raises(KeyError, match=first.bundle_location):
+        seed_stores.agent_cache.load(first.id, first.bundle_location)
+
+    server_app._ensure_default_native_agents(
+        seed_stores.agent_store,
+        seed_stores.artifact_store,
+        seed_stores.agent_cache,
+    )
+
+    repaired = seed_stores.agent_store.get_by_name(QWEN_NATIVE_AGENT_NAME)
+    assert repaired is not None
+    assert repaired.id == first.id
+    assert repaired.version == first.version == 1
+    assert seed_stores.artifact_store.exists(repaired.bundle_location)
+    assert seed_stores.agent_cache.load(repaired.id, repaired.bundle_location).spec.name
+
+
 def test_ensure_default_polly_agent_seeds_card(seed_stores: _SeedStores) -> None:
     """
     Seeding registers polly as a built-in the picker can render.

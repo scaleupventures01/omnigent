@@ -97,6 +97,21 @@ describe("requestNotificationPermission", () => {
 });
 
 describe("showNotification", () => {
+  it("does not crash when a mobile browser rejects the constructor", () => {
+    const ctor = vi.fn(() => {
+      throw new TypeError(
+        "Failed to construct 'Notification': Illegal constructor. " +
+          "Use ServiceWorkerRegistration.showNotification() instead.",
+      );
+    }) as unknown as typeof Notification;
+    (ctor as unknown as { permission: NotificationPermission }).permission = "granted";
+    (ctor as unknown as { requestPermission: unknown }).requestPermission = vi.fn();
+    vi.stubGlobal("Notification", ctor);
+
+    expect(() => showNotification({ title: "X" })).not.toThrow();
+    expect(showNotification({ title: "X" })).toBeNull();
+  });
+
   it("creates a notification with title, body, and tag when granted", () => {
     installNotification("granted");
     const result = showNotification({ title: "My Session", body: "Done", tag: "t1" });

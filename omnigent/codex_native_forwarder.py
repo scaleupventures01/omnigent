@@ -1966,6 +1966,24 @@ async def _maybe_rotate_session_on_thread_started(
     # its own Omnigent child session by ``_handle_event``.
     if _thread_started_is_subagent(event):
         return False
+    # A live Codex turn can create auxiliary top-level threads whose source
+    # metadata does not identify them as AgentControl children.  They are not
+    # user-requested /clear rotations: the terminal remains on the current
+    # thread and its response continues there.  Moving Omnigent ownership at
+    # this point strands the real response in the old session and sends later
+    # web turns to an empty thread.  /clear is an idle-terminal action, so only
+    # rotate when no injected turn is active.
+    bridge_state = read_bridge_state(bridge_dir)
+    if bridge_state is not None and bridge_state.active_turn_id is not None:
+        _logger.info(
+            "Codex forwarder ignored auxiliary thread started during active turn: "
+            "session=%s active_thread=%s auxiliary_thread=%s active_turn=%s",
+            target.session_id,
+            target.thread_id,
+            new_thread_id,
+            bridge_state.active_turn_id,
+        )
+        return False
     old_delta_coalescer = target.delta_coalescer
     await old_delta_coalescer.flush()
     old_usage_coalescer = target.usage_coalescer
@@ -1978,6 +1996,11 @@ async def _maybe_rotate_session_on_thread_started(
         bridge_dir=bridge_dir,
         app_server_url=app_server_url,
         new_thread_id=new_thread_id,
+    )
+    await _post_thread_rotation_supersession(
+        ap_client,
+        old_session_id=old_session_id,
+        new_session_id=new_session_id,
     )
     target.session_id = new_session_id
     target.thread_id = new_thread_id
@@ -1995,6 +2018,66 @@ async def _maybe_rotate_session_on_thread_started(
         new_thread_id,
     )
     return True
+
+
+async def _post_thread_rotation_supersession(
+    client: httpx.AsyncClient,
+    *,
+    old_session_id: str,
+    new_session_id: str,
+) -> None:
+    """Notify clients that a native Codex thread rotation moved the session.
+
+    Terminal ownership has already moved to ``new_session_id`` when this runs.
+    The persisted notice makes a later reload of the old conversation safe and
+    understandable; the transient superseded event redirects a live viewer
+    immediately so it cannot submit another turn and launch a second writer for
+    the transferred Codex thread.
+    """
+    if old_session_id == new_session_id:
+        return
+
+    notice = (
+        "Codex continued this conversation in "
+        f"[a new chat](/c/{new_session_id}). Continue there."
+    )
+    events = (
+        {
+            "type": "external_session_status",
+            "data": {"status": "idle"},
+        },
+        {
+            "type": "external_conversation_item",
+            "data": {
+                "item_type": "message",
+                "item_data": {
+                    "role": "assistant",
+                    "agent": "codex-native-ui",
+                    "content": [{"type": "output_text", "text": notice}],
+                },
+            },
+        },
+        {
+            "type": "external_session_superseded",
+            "data": {"target_conversation_id": new_session_id},
+        },
+    )
+    for payload in events:
+        try:
+            response = await client.post(
+                f"/v1/sessions/{url_component(old_session_id)}/events",
+                json=payload,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            _logger.warning(
+                "Failed to post Codex thread-rotation supersession event; "
+                "old_session=%s new_session=%s event_type=%s",
+                old_session_id,
+                new_session_id,
+                payload["type"],
+                exc_info=True,
+            )
 
 
 async def _create_thread_replacement_session(
