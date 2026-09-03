@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "kind": "jirai-repository-roadmap",
+  "repository": "scaleupventures01/omnigent",
+  "coverage_policy": "hold-unmapped",
+  "inherit_ranked_epic_workstreams": true,
+  "complete_repository_roadmap": true,
+  "source_inventory": {
+    "kind": "github-open-issues",
+    "open_issue_count": 0,
+    "verified_at": "2026-09-03T16:00:00Z",
+    "reason": "ACTIVE repository verified with zero open issues; no executable roadmap work exists.",
+    "operator_review_required": false
+  },
+  "roadmaps": []
+}
