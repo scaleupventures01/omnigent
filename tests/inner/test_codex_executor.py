@@ -2502,6 +2502,24 @@ def test_populate_codex_home_config_symlinks_plugins_cache(tmp_path: Path) -> No
     assert not (target / "plugins" / ".remote-plugin-install-staging").exists()
 
 
+def test_populate_codex_home_config_creates_empty_hooks_projection(tmp_path: Path) -> None:
+    """The hooks projection exists but does not expose source hook files."""
+    from omnigent.inner.codex_executor import _populate_codex_home_config
+
+    source = tmp_path / "real_codex_home"
+    (source / "hooks").mkdir(parents=True)
+    (source / "hooks" / "not-admitted.sh").write_text("exit 99\n")
+    target = tmp_path / "temp_codex_home"
+    target.mkdir()
+
+    _populate_codex_home_config(target, source)
+
+    projection = target / "hooks"
+    assert projection.is_dir()
+    assert not projection.is_symlink()
+    assert list(projection.iterdir()) == []
+
+
 def test_populate_codex_home_config_minimal_mode_skips_plugins_cache(tmp_path: Path) -> None:
     """Minimal (title-sidecar) mode does not link plugins — it runs no plugins."""
     from omnigent.inner.codex_executor import _populate_codex_home_config
@@ -2517,6 +2535,7 @@ def test_populate_codex_home_config_minimal_mode_skips_plugins_cache(tmp_path: P
     _populate_codex_home_config(target, source, minimal_config=True)
 
     assert not (target / "plugins" / "cache").exists()
+    assert not (target / "hooks").exists()
 
 
 def test_populate_codex_home_config_minimal_mode_keeps_only_provider_routing(
