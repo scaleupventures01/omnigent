@@ -226,6 +226,7 @@ def teardown_identities(
 
     active: list[ProcessIdentity] = []
     skipped: list[ProcessIdentity] = []
+    kill_targets: list[ProcessIdentity] = []
     for identity in reversed(unique):
         if not identity_matches(identity):
             skipped.append(identity)
@@ -233,15 +234,19 @@ def teardown_identities(
         if not process_alive(identity.pid):
             continue
         try:
-            psutil.Process(identity.pid).terminate()
-            active.append(identity)
+            process = psutil.Process(identity.pid)
+            if IS_POSIX:
+                process.terminate()
+                active.append(identity)
+            else:
+                process.kill()
+                kill_targets.append(identity)
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             continue
 
     remaining = _wait_identities(active, grace)
     remaining_keys = {(item.pid, item.create_time) for item in remaining}
     terminated = [item for item in active if (item.pid, item.create_time) not in remaining_keys]
-    kill_targets: list[ProcessIdentity] = []
     for identity in remaining:
         if not identity_matches(identity):
             skipped.append(identity)

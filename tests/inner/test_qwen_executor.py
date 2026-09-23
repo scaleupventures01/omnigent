@@ -2196,7 +2196,7 @@ async def test_local_ollama_route_overrides_ambient_qwen_oauth(
             ]
         },
         "security": {"auth": {"selectedType": "openai"}},
-        "selectedAuthType": "openai"
+        "selectedAuthType": "openai",
     }
     assert ambient.read_text(encoding="utf-8") == '{"selectedAuthType":"qwen-oauth"}\n'
 
