@@ -1,9 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { homedir } from 'node:os';
+import path from 'node:path';
 
 const HOST = '127.0.0.1';
 const PORT = 6789;
-const DATA_PATH = '/Users/calvinwilliamsjr/.claude/statusline-data.json';
+const DATA_PATH = process.env.OMNI_STATUSLINE_DATA ?? path.join(homedir(), '.claude', 'statusline-data.json');
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:6767',
   'http://127.0.0.1:6767',

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.calvin.omni-statusline-server</string>
+	<key>ProgramArguments</key><array><string>/Users/niaopenclaw/.local/node24/bin/node</string><string>/Users/niaopenclaw/omnigent-statusline/serve-statusline.mjs</string></array>
+	<key>WorkingDirectory</key><string>/Users/niaopenclaw/omnigent-statusline</string>
+	<key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/niaopenclaw</string></dict>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>/Users/niaopenclaw/Library/Logs/omni-statusline-server.log</string>
+	<key>StandardErrorPath</key><string>/Users/niaopenclaw/Library/Logs/omni-statusline-server.log</string>
+</dict>
+</plist>
