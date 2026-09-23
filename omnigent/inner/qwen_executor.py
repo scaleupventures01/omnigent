@@ -174,24 +174,27 @@ def _materialize_qwen_system_settings(base_url: str, model: str) -> Path:
     # Qwen Code <=0.0.6 reads the legacy top-level key, while current
     # releases read security.auth.selectedType. Keep both so Omnigent's
     # isolated provider selection works across the ACP compatibility range.
-    rendered = json.dumps(
-        {
-            "model": {"name": model},
-            "modelProviders": {
-                "openai": [
-                    {
-                        "baseUrl": base_url,
-                        "envKey": "OPENAI_API_KEY",
-                        "id": model,
-                        "name": model,
-                    }
-                ]
+    rendered = (
+        json.dumps(
+            {
+                "model": {"name": model},
+                "modelProviders": {
+                    "openai": [
+                        {
+                            "baseUrl": base_url,
+                            "envKey": "OPENAI_API_KEY",
+                            "id": model,
+                            "name": model,
+                        }
+                    ]
+                },
+                "security": {"auth": {"selectedType": "openai"}},
+                "selectedAuthType": "openai",
             },
-            "security": {"auth": {"selectedType": "openai"}},
-            "selectedAuthType": "openai",
-        },
-        sort_keys=True,
-    ) + "\n"
+            sort_keys=True,
+        )
+        + "\n"
+    )
     if target.is_file() and not target.is_symlink():
         try:
             if target.read_text(encoding="utf-8") == rendered:
