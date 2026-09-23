@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import { access, chmod, mkdir, readFile, rename, rmdir, stat, utimes, writeFile } from "node:fs/promises";
 import http from "node:http";
@@ -6,11 +6,12 @@ import net from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const LISTEN_HOST = "127.0.0.1";
 const LISTEN_PORT = Number(process.env.OMNIGENT_FORKED_UI_PORT ?? 6768);
 const BACKEND_HOST = "127.0.0.1";
-const BACKEND_PORT = 6767;
+const BACKEND_PORT = Number(process.env.OMNIGENT_FORKED_UI_BACKEND_PORT ?? 6767);
 const METRICS_HOST = "127.0.0.1";
 const METRICS_PORT = 6789;
 const METRICS_PATH = "/statusline";
@@ -34,7 +35,19 @@ const KIMI_OAUTH_LOCK_TARGET = path.join(USER_HOME, ".kimi-code", "oauth", "kimi
 const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const KIMI_TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
 const KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
-const STATIC_ROOT = "/Users/calvinwilliamsjr/Domains/infra/omnigent/omnigent/server/static/web-ui";
+const GLM_USAGE_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
+const GLM_SECRET_NAME = "zai";
+const OMNIGENT_KEYCHAIN_SERVICE = "omnigent";
+const OMNIGENT_SECRETS_FILE = path.join(USER_HOME, ".omnigent", "secrets.json");
+const OMNIGENT_PYTHON_CANDIDATES = [
+  path.join(USER_HOME, ".local", "share", "uv", "tools", "omnigent", "bin", "python"),
+];
+const GLM_CREDENTIAL_TIMEOUT_MS = 4000;
+const execFileP = promisify(execFile);
+const STATIC_ROOT = path.resolve(
+  process.env.OMNIGENT_FORKED_UI_STATIC_ROOT ??
+  path.join(USER_HOME, "omnigent-recovery-source/omnigent/server/static/web-ui"),
+);
 const INDEX_FILE = path.join(STATIC_ROOT, "index.html");
 const PROXY_PREFIXES = ["/v1", "/api", "/auth", "/health"];
 
@@ -88,6 +101,7 @@ function sendText(response, statusCode, body) {
 
   response.writeHead(statusCode, {
     "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
     "Content-Length": Buffer.byteLength(body),
     Connection: "close",
   });
@@ -225,6 +239,87 @@ function usageWindow(usedPercent, resetsAt) {
 
 function emptyProviderUsage() {
   return { fiveHour: null, weekly: null };
+}
+
+// The zai secret is read through the omnigent venv's Python keyring rather
+// than the `security` CLI: the keychain item's ACL is bound to that Python
+// binary, so the CLI path blocks on an authorization prompt and can never
+// serve a headless statusline.
+async function loadOmnigentZaiSecret({
+  pythonCandidates = OMNIGENT_PYTHON_CANDIDATES,
+  secretsFile = OMNIGENT_SECRETS_FILE,
+} = {}) {
+  const keyringDisabled = /^(1|true|yes)$/i.test(
+    String(process.env.OMNIGENT_DISABLE_KEYRING ?? "").trim(),
+  );
+  if (!keyringDisabled) {
+    for (const candidate of pythonCandidates) {
+      try {
+        await access(candidate, fsConstants.X_OK);
+      } catch {
+        continue;
+      }
+      try {
+        const { stdout } = await execFileP(
+          candidate,
+          [
+            "-c",
+            `import keyring; print(keyring.get_password(${JSON.stringify(OMNIGENT_KEYCHAIN_SERVICE)}, ${JSON.stringify(GLM_SECRET_NAME)}) or "")`,
+          ],
+          { timeout: GLM_CREDENTIAL_TIMEOUT_MS },
+        );
+        const secret = stdout.trim();
+        if (secret.length > 0) return secret;
+        break;
+      } catch {
+        // A broken keyring backend falls through to the file backend.
+      }
+    }
+  }
+
+  try {
+    const secrets = JSON.parse(await readFile(secretsFile, "utf8"));
+    const secret = secrets?.[GLM_SECRET_NAME];
+    if (typeof secret === "string" && secret.length > 0) return secret;
+  } catch {
+    // No file backend present either.
+  }
+  return null;
+}
+
+function normalizeGlmUsagePayload(payload) {
+  const limits = Array.isArray(payload?.data?.limits)
+    ? payload.data.limits
+    : Array.isArray(payload?.limits)
+      ? payload.limits
+      : [];
+  const creditLimitRow = (unit) =>
+    limits.find((row) => row?.type === "CREDIT_LIMIT" && Number(row?.unit) === unit);
+  const usageFor = (unit) => {
+    const row = creditLimitRow(unit);
+    return row == null ? null : usageWindow(row.percentage, row.nextResetTime);
+  };
+  return {
+    fiveHour: usageFor(3),
+    weekly: usageFor(6),
+  };
+}
+
+async function readGlmUsage({
+  env = process.env,
+  loadSecret = loadOmnigentZaiSecret,
+  fetchPayload = (token) => fetchJson(GLM_USAGE_URL, {
+    headers: {
+      Authorization: token,
+      "Accept-Language": "en-US,en",
+      "Content-Type": "application/json",
+    },
+  }),
+} = {}) {
+  const override = typeof env.ZAI_API_KEY === "string" ? env.ZAI_API_KEY.trim() : "";
+  const token = override.length > 0 ? override : await loadSecret();
+  if (!token) throw new Error("GLM quota credential is unavailable");
+  return normalizeGlmUsagePayload(await fetchPayload(token));
 }
 
 function normalizeClaudeUsage(raw) {
@@ -569,7 +664,7 @@ function createProviderRateLimitCollector({
   collectors = {
     claude: readClaudeUsage,
     chatgpt: readCodexUsage,
-    kimi: readKimiUsage,
+    glm: readGlmUsage,
   },
   onError = logError,
 } = {}) {
@@ -587,13 +682,13 @@ function createProviderRateLimitCollector({
       const providers = {
         claude: emptyProviderUsage(),
         chatgpt: emptyProviderUsage(),
-        kimi: emptyProviderUsage(),
+        glm: emptyProviderUsage(),
       };
       let claudeLegacy = null;
       const results = await Promise.allSettled([
         collectors.claude(),
         collectors.chatgpt(),
-        collectors.kimi(),
+        collectors.glm(),
       ]);
 
       if (results[0].status === "fulfilled") {
@@ -604,8 +699,8 @@ function createProviderRateLimitCollector({
       }
       if (results[1].status === "fulfilled") providers.chatgpt = results[1].value;
       else onError("ChatGPT rate-limit collector failed", results[1].reason);
-      if (results[2].status === "fulfilled") providers.kimi = results[2].value;
-      else onError("Kimi rate-limit collector failed", results[2].reason);
+      if (results[2].status === "fulfilled") providers.glm = results[2].value;
+      else onError("GLM rate-limit collector failed", results[2].reason);
 
       const capturedAtMs = now();
       const value = {
@@ -632,10 +727,13 @@ export const collectProviderRateLimits = createProviderRateLimitCollector();
 export const __providerUsageTest = Object.freeze({
   cacheControlForStaticFile,
   createProviderRateLimitCollector,
+  loadOmnigentZaiSecret,
   normalizeClaudeUsage,
   normalizeCodexRateLimits,
+  normalizeGlmUsagePayload,
   normalizeKimiUsagePayload,
   parseCodexJsonLines,
+  readGlmUsage,
   reclaimStaleKimiCredentialLock,
   redactProviderSecrets,
   resolveCodexBinary,
@@ -685,6 +783,7 @@ function proxyHttpRequest(request, response, targetPath) {
       }
 
       upstreamResponse.on("error", (error) => {
+        if (response.destroyed) return;
         logError("backend response stream failed", error);
         response.destroy(error);
       });
@@ -693,10 +792,16 @@ function proxyHttpRequest(request, response, targetPath) {
   );
 
   upstreamRequest.on("error", (error) => {
+    if (response.destroyed) return;
     logError("backend HTTP request failed", error);
     sendText(response, 502, "Bad Gateway\n");
   });
 
+  response.on("close", () => {
+    // An incoming GET may already be complete when its client disconnects,
+    // so request "aborted" cannot release a stalled or streaming backend.
+    if (!response.writableFinished) upstreamRequest.destroy();
+  });
   request.on("aborted", () => {
     upstreamRequest.destroy();
   });
@@ -744,22 +849,14 @@ async function resolveStaticFile(pathname) {
     }
   }
 
-  // A MISSING BUILD ASSET IS A 404, NOT THE SPA SHELL. Everything under
-  // /assets/ is an immutable, content-hashed build output; it is never a
-  // client-side route. Falling back to index.html there answers a JS module
-  // request with `200 text/html`, which the browser reports only as the
-  // opaque "Failed to fetch dynamically imported module" -- the app white-
-  // screens and nothing in the response says why.
-  //
-  // This is how a deploy breaks an ALREADY-OPEN tab: the running app asks for
-  // a lazy chunk whose hash the new build deleted, gets HTML with a 200, and
-  // dies. Measured 2026-08-25 on a phone against a removed
-  // `highlighted-body-OFNGDK62-BIxezyWH.js`, and reproduced here 2026-08-27:
-  // an invented asset path returned `http=200 type=text/html size=4532`.
-  // A real 404 is both honest and recoverable -- caches and service workers
-  // treat it correctly, and a chunk-error boundary can act on it.
-  if (decodedPath.startsWith("/assets/")) {
-    const error = new Error(`build asset not found: ${decodedPath}`);
+  // A miss under /assets/ is a broken deploy, never a client-side route.
+  // Answering it with index.html at HTTP 200 makes the failure CACHEABLE:
+  // fingerprinted assets are served immutable, so any browser that sees the
+  // fallback pins a permanent bad entry and cannot recover when the file is
+  // restored. Measured 2026-08-27: 48 chunks missing, mobile dead for hours
+  // after the files were put back. 404 keeps the failure self-healing.
+  if (relativePath.startsWith("assets/")) {
+    const error = new Error("static asset not found: " + relativePath);
     error.statusCode = 404;
     throw error;
   }
@@ -783,12 +880,12 @@ async function serveStaticRequest(request, response, pathname) {
   }
 
   const filePath = await resolveStaticFile(pathname);
-  const fileStat = await stat(filePath);
   const contentType = CONTENT_TYPES.get(path.extname(filePath).toLowerCase()) ?? "application/octet-stream";
+  const body = await readFile(filePath);
 
   response.writeHead(200, {
     "Content-Type": contentType,
-    "Content-Length": fileStat.size,
+    "Content-Length": body.length,
     "Cache-Control": cacheControlForStaticFile(filePath),
     "X-Content-Type-Options": "nosniff",
   });
@@ -798,12 +895,7 @@ async function serveStaticRequest(request, response, pathname) {
     return;
   }
 
-  const fileStream = createReadStream(filePath);
-  fileStream.on("error", (error) => {
-    logError(`static file stream failed for ${filePath}`, error);
-    response.destroy(error);
-  });
-  fileStream.pipe(response);
+  response.end(body);
 }
 
 async function handleHttpRequest(request, response) {
@@ -851,9 +943,7 @@ async function handleHttpRequest(request, response) {
   } catch (error) {
     const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
     logError("static request failed", error);
-    const statusText =
-      statusCode === 400 ? "Bad Request\n" : statusCode === 404 ? "Not Found\n" : "Internal Server Error\n";
-    sendText(response, statusCode, statusText);
+    sendText(response, statusCode, statusCode === 400 ? "Bad Request\n" : statusCode === 404 ? "Not Found\n" : "Internal Server Error\n");
   }
 }
 

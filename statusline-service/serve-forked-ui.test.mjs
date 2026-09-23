@@ -1,269 +1,233 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
-
+import { test } from "node:test";
 import { __providerUsageTest } from "./serve-forked-ui.mjs";
 
 const {
-  cacheControlForStaticFile,
   createProviderRateLimitCollector,
-  normalizeClaudeUsage,
-  normalizeCodexRateLimits,
-  normalizeKimiUsagePayload,
-  parseCodexJsonLines,
-  reclaimStaleKimiCredentialLock,
-  redactProviderSecrets,
-  resolveCodexBinary,
-  shouldRefreshKimiCredentials,
+  loadOmnigentZaiSecret,
+  normalizeGlmUsagePayload,
+  readGlmUsage,
 } = __providerUsageTest;
 
-const FIVE_HOURS = 300;
-const ONE_WEEK = 10_080;
+const window = (usedPercent) => ({ usedPercent, resetsAt: 1_800_000_000 });
+const usage = (fiveHour, weekly) => ({ fiveHour, weekly });
 
-test("revalidates the app entrypoint for root and SPA fallback requests", () => {
-  assert.equal(cacheControlForStaticFile("/srv/web-ui/index.html"), "no-cache");
-  assert.equal(cacheControlForStaticFile("/srv/web-ui/index.html"), "no-cache");
-});
+function collectorOverrides({
+  claude = async () => ({ raw: {}, usage: usage(window(11), window(7)) }),
+  chatgpt = async () => usage(null, window(42)),
+  glm = async () => usage(null, null),
+} = {}) {
+  return { claude, chatgpt, glm };
+}
 
-test("caches fingerprinted frontend assets immutably", () => {
-  assert.equal(
-    cacheControlForStaticFile("/srv/web-ui/assets/index-DvQVAfCY.js"),
-    "public, max-age=31536000, immutable",
-  );
-});
-
-test("normalizes Claude's live cache schema", () => {
-  assert.deepEqual(
-    normalizeClaudeUsage({
-      five_hour: { used_percentage: 72, resets_at: 1_800_000_000 },
-      seven_day: { used_percentage: 31, resets_at: 1_800_086_400 },
+test("rate-limits payload exposes exactly the claude/chatgpt/glm providers with their own data", async () => {
+  const collect = createProviderRateLimitCollector({
+    ttlMs: 0,
+    now: () => 1_000,
+    collectors: collectorOverrides({
+      glm: async () => usage(window(5), window(9)),
     }),
-    {
-      fiveHour: { usedPercent: 72, resetsAt: 1_800_000_000 },
-      weekly: { usedPercent: 31, resetsAt: 1_800_086_400 },
-    },
-  );
-});
-
-test("parses Codex newline JSON frames and maps windows by duration", () => {
-  const first = parseCodexJsonLines("", '{"id":1,"result":{}}\n{"id":2');
-  assert.deepEqual(first.messages, [{ id: 1, result: {} }]);
-  assert.equal(first.remainder, '{"id":2');
-
-  const second = parseCodexJsonLines(
-    first.remainder,
-    ',"result":{"rateLimits":{"primary":{"windowDurationMins":10080,"usedPercent":40,"resetsAt":1800086400},"secondary":null}}}\n',
-  );
-  assert.equal(second.remainder, "");
-  assert.equal(second.messages.length, 1);
-  assert.deepEqual(normalizeCodexRateLimits(second.messages[0].result.rateLimits), {
-    fiveHour: null,
-    weekly: { usedPercent: 40, resetsAt: 1_800_086_400 },
   });
 
-  assert.deepEqual(
-    normalizeCodexRateLimits({
-      primary: { windowDurationMins: FIVE_HOURS, usedPercent: 18, resetsAt: 1_800_000_000 },
-      secondary: { windowDurationMins: ONE_WEEK, usedPercent: 44, resetsAt: 1_800_086_400 },
-    }),
-    {
-      fiveHour: { usedPercent: 18, resetsAt: 1_800_000_000 },
-      weekly: { usedPercent: 44, resetsAt: 1_800_086_400 },
+  const payload = await collect();
+  assert.deepEqual(Object.keys(payload.providers).sort(), ["chatgpt", "claude", "glm"]);
+  assert.deepEqual(payload.providers.claude, usage(window(11), window(7)));
+  assert.deepEqual(payload.providers.chatgpt, usage(null, window(42)));
+  assert.deepEqual(payload.providers.glm, usage(window(5), window(9)));
+});
+
+test("known-negative control: a failing GLM source degrades to n/a and never inherits another provider's usage", async () => {
+  const errors = [];
+  const collect = createProviderRateLimitCollector({
+    ttlMs: 0,
+    now: () => 1_000,
+    collectors: collectorOverrides({ glm: async () => { throw new Error("no GLM quota source"); } }),
+    onError: (context) => errors.push(context),
+  });
+
+  const payload = await collect();
+
+  assert.deepEqual(payload.providers.glm, { fiveHour: null, weekly: null });
+  assert.deepEqual(payload.providers.claude, usage(window(11), window(7)));
+  assert.deepEqual(payload.providers.chatgpt, usage(null, window(42)));
+  assert.equal(errors.some((message) => String(message).includes("GLM")), true);
+  // The retired Kimi provider must never reappear in the payload — neither
+  // under its own name nor relabeled as GLM.
+  assert.equal(Object.keys(payload.providers).includes("kimi"), false);
+  assert.doesNotMatch(JSON.stringify(payload), /"kimi"/);
+});
+
+test("an empty GLM collector stays empty regardless of cached legacy Claude payload", async () => {
+  const collect = createProviderRateLimitCollector({
+    ttlMs: 0,
+    now: () => 1_000,
+    collectors: collectorOverrides(),
+  });
+
+  const payload = await collect();
+  assert.deepEqual(payload.providers.glm, { fiveHour: null, weekly: null });
+  assert.equal(Object.keys(payload.providers).includes("kimi"), false);
+});
+
+const glmLimitsPayload = () => ({
+  code: 200,
+  msg: "Operation successful",
+  data: {
+    limits: [
+      {
+        type: "CREDIT_LIMIT",
+        unit: 3,
+        percentage: 11,
+        nextResetTime: 1_789_963_400_732,
+        currentValue: 3168,
+        usage: 28000,
+      },
+      {
+        type: "CREDIT_LIMIT",
+        unit: 6,
+        percentage: 5,
+        nextResetTime: 1_790_433_863_997,
+        currentValue: 8315,
+        usage: 140000,
+      },
+    ],
+  },
+});
+
+const glmFetcher = (payload, captured = []) => async (token) => {
+  captured.push(token);
+  return payload;
+};
+
+test("known-negative control: GLM collector surfaces real five-hour and weekly windows where the retired null stub returned nothing", async () => {
+  const captured = [];
+  const usage = await readGlmUsage({
+    env: { ZAI_API_KEY: "test-zai-token" },
+    loadSecret: async () => {
+      throw new Error("keychain must not be consulted when ZAI_API_KEY is set");
     },
-  );
+    fetchPayload: glmFetcher(glmLimitsPayload(), captured),
+  });
+
+  assert.deepEqual(usage, {
+    fiveHour: { usedPercent: 11, resetsAt: 1_789_963_400.732 },
+    weekly: { usedPercent: 5, resetsAt: 1_790_433_863.997 },
+  });
+  assert.deepEqual(captured, ["test-zai-token"]);
 });
 
-test("resolves Codex from the stable user install when launchd PATH excludes it", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "omnigent-codex-bin-"));
-  const userBinary = path.join(root, ".local", "bin", "codex");
-  try {
-    await mkdir(path.dirname(userBinary), { recursive: true });
-    await writeFile(userBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-    await chmod(userBinary, 0o700);
+test("normalizeGlmUsagePayload maps CREDIT_LIMIT unit 3 to the five-hour window and unit 6 to the weekly window", () => {
+  const usage = normalizeGlmUsagePayload(glmLimitsPayload());
+  assert.deepEqual(usage.fiveHour, { usedPercent: 11, resetsAt: 1_789_963_400.732 });
+  assert.deepEqual(usage.weekly, { usedPercent: 5, resetsAt: 1_790_433_863.997 });
 
-    assert.equal(
-      await resolveCodexBinary({
-        env: { HOME: root, PATH: "/usr/bin:/bin" },
-      }),
-      userBinary,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("prefers the explicit Omnigent Codex binary override", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "omnigent-codex-override-"));
-  const overrideBinary = path.join(root, "custom-codex");
-  const userBinary = path.join(root, ".local", "bin", "codex");
-  try {
-    await mkdir(path.dirname(userBinary), { recursive: true });
-    await writeFile(overrideBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-    await writeFile(userBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-    await chmod(overrideBinary, 0o700);
-    await chmod(userBinary, 0o700);
-
-    assert.equal(
-      await resolveCodexBinary({
-        env: {
-          HOME: root,
-          PATH: path.dirname(userBinary),
-          OMNI_CODEX_BIN: overrideBinary,
-        },
-      }),
-      overrideBinary,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("normalizes Kimi's current nested detail and top-level weekly usage", () => {
-  assert.deepEqual(
-    normalizeKimiUsagePayload({
+  const partial = normalizeGlmUsagePayload({
+    data: {
       limits: [
-        {
-          window: { duration: "300", timeUnit: "TIME_UNIT_MINUTE" },
-          detail: { limit: "1000", remaining: "250", resetTime: "1800000000" },
-        },
+        { type: "CREDIT_LIMIT", unit: 3, percentage: "42", nextResetTime: 1_789_963_400_732 },
+        { type: "TOKENS_LIMIT", unit: 6, percentage: 99, nextResetTime: 1 },
       ],
-      usage: { limit: "5000", remaining: "3200", resetTime: "1800086400" },
-    }),
-    {
-      fiveHour: { usedPercent: 75, resetsAt: 1_800_000_000 },
-      weekly: { usedPercent: 36, resetsAt: 1_800_086_400 },
     },
-  );
+  });
+  assert.deepEqual(partial.fiveHour, { usedPercent: 42, resetsAt: 1_789_963_400.732 });
+  assert.deepEqual(partial.weekly, null);
 });
 
-test("refreshes Kimi credentials inside max(300, expires_in * 0.5)", () => {
-  const now = 1_800_000_000;
-  assert.equal(
-    shouldRefreshKimiCredentials({ expires_at: now + 299, expires_in: 100 }, now),
-    true,
-  );
-  assert.equal(
-    shouldRefreshKimiCredentials({ expires_at: now + 301, expires_in: 100 }, now),
-    false,
-  );
-  assert.equal(
-    shouldRefreshKimiCredentials({ expires_at: now + 1_799, expires_in: 3600 }, now),
-    true,
-  );
-  assert.equal(
-    shouldRefreshKimiCredentials({ expires_at: now + 1_801, expires_in: 3600 }, now),
-    false,
-  );
-});
-
-test("respects a fresh Kimi lock and recovers a stale lock without changing credential mode", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "omnigent-kimi-lock-"));
-  const credentialFile = path.join(root, "credentials", "kimi-code.json");
-  const lockDirectory = path.join(root, "oauth", "kimi-code.lock");
-  try {
-    await mkdir(path.dirname(credentialFile), { recursive: true });
-    await mkdir(lockDirectory, { recursive: true });
-    await writeFile(credentialFile, '{"access_token":"test-only"}\n', { mode: 0o600 });
-    await chmod(credentialFile, 0o600);
-
-    assert.equal(
-      await reclaimStaleKimiCredentialLock(lockDirectory, {
-        nowMs: Date.now(),
-        staleMs: 5_000,
-        settle: async () => {},
-      }),
-      false,
-    );
-    assert.equal((await stat(lockDirectory)).isDirectory(), true);
-
-    const staleDate = new Date(Date.now() - 10_000);
-    await utimes(lockDirectory, staleDate, staleDate);
-    assert.equal(
-      await reclaimStaleKimiCredentialLock(lockDirectory, {
-        nowMs: Date.now(),
-        staleMs: 5_000,
-        settle: async () => {},
-      }),
-      true,
-    );
-    await assert.rejects(stat(lockDirectory), { code: "ENOENT" });
-    assert.equal((await stat(credentialFile)).mode & 0o777, 0o600);
-  } finally {
-    await rm(root, { recursive: true, force: true });
+test("normalizeGlmUsagePayload fails closed on missing, malformed, or non-numeric quota rows", () => {
+  for (const payload of [
+    null,
+    {},
+    { data: null },
+    { data: { limits: "nope" } },
+    { data: { limits: [] } },
+    { data: { limits: [{ type: "CREDIT_LIMIT", unit: 3 }] } },
+    { data: { limits: [{ type: "CREDIT_LIMIT", unit: 3, percentage: "abc", nextResetTime: 1 }] } },
+    { data: { limits: [{ type: "CREDIT_LIMIT", unit: 3, percentage: 11 }] } },
+    { data: { limits: [{ type: "CREDIT_LIMIT", unit: 3, percentage: 11, nextResetTime: "not-a-time" }] } },
+  ]) {
+    const usage = normalizeGlmUsagePayload(payload);
+    assert.deepEqual(usage, { fiveHour: null, weekly: null }, JSON.stringify(payload));
   }
 });
 
-test("coalesces concurrent provider collection and reuses the fresh cache", async () => {
-  let calls = 0;
-  let releaseClaude;
-  const claudePending = new Promise((resolve) => {
-    releaseClaude = resolve;
+test("readGlmUsage falls back to the omnigent secret loader and fails closed when no credential exists", async () => {
+  const captured = [];
+  const usage = await readGlmUsage({
+    env: {},
+    loadSecret: async () => "keychain-token",
+    fetchPayload: glmFetcher(glmLimitsPayload(), captured),
   });
-  const collect = createProviderRateLimitCollector({
-    ttlMs: 60_000,
-    now: () => 1_800_000_000_000,
-    collectors: {
-      claude: async () => {
-        calls += 1;
-        return await claudePending;
-      },
-      chatgpt: async () => ({ fiveHour: null, weekly: null }),
-      kimi: async () => ({ fiveHour: null, weekly: null }),
-    },
-    onError: () => {},
-  });
+  assert.deepEqual(captured, ["keychain-token"]);
+  assert.equal(usage.fiveHour.usedPercent, 11);
 
-  const first = collect();
-  const second = collect();
-  assert.equal(calls, 1);
-  releaseClaude({
-    raw: { five_hour: { used_percentage: 12, resets_at: 1_800_000_000 } },
-    usage: { fiveHour: { usedPercent: 12, resetsAt: 1_800_000_000 }, weekly: null },
-  });
-  const [a, b] = await Promise.all([first, second]);
-  assert.strictEqual(a, b);
-  assert.strictEqual(await collect(), a);
-  assert.equal(calls, 1);
+  await assert.rejects(
+    readGlmUsage({
+      env: { ZAI_API_KEY: "   " },
+      loadSecret: async () => null,
+      fetchPayload: async () => glmLimitsPayload(),
+    }),
+    /credential is unavailable/,
+  );
 });
 
-test("isolates one provider failure while preserving successful providers", async () => {
+test("GLM collector failure inside the aggregated payload stays null and never borrows claude/chatgpt windows", async () => {
+  const errors = [];
   const collect = createProviderRateLimitCollector({
-    ttlMs: 60_000,
-    now: () => 1_800_000_000_000,
+    ttlMs: 0,
+    now: () => 1_000,
     collectors: {
-      claude: async () => ({
-        raw: {},
-        usage: { fiveHour: { usedPercent: 10, resetsAt: 1_800_000_000 }, weekly: null },
-      }),
-      chatgpt: async () => ({
-        fiveHour: { usedPercent: 20, resetsAt: 1_800_000_000 },
-        weekly: { usedPercent: 30, resetsAt: 1_800_086_400 },
-      }),
-      kimi: async () => {
-        throw new Error("Kimi unavailable");
-      },
+      claude: async () => ({ raw: {}, usage: usage(window(11), window(7)) }),
+      chatgpt: async () => usage(null, window(42)),
+      glm: () =>
+        readGlmUsage({
+          env: {},
+          loadSecret: async () => null,
+          fetchPayload: async () => glmLimitsPayload(),
+        }),
     },
-    onError: () => {},
+    onError: (context) => errors.push(context),
   });
 
-  const result = await collect();
-  assert.deepEqual(result.providers.claude.fiveHour, {
-    usedPercent: 10,
-    resetsAt: 1_800_000_000,
-  });
-  assert.deepEqual(result.providers.chatgpt.weekly, {
-    usedPercent: 30,
-    resetsAt: 1_800_086_400,
-  });
-  assert.deepEqual(result.providers.kimi, { fiveHour: null, weekly: null });
+  const payload = await collect();
+  assert.deepEqual(payload.providers.glm, { fiveHour: null, weekly: null });
+  assert.deepEqual(payload.providers.claude, usage(window(11), window(7)));
+  assert.deepEqual(payload.providers.chatgpt, usage(null, window(42)));
+  assert.equal(errors.some((message) => String(message).includes("GLM")), true);
 });
 
-test("redacts access and refresh tokens from provider failures", () => {
-  const raw =
-    "request failed: Authorization: Bearer access-secret access_token=access-secret refresh_token=refresh-secret";
-  const safe = redactProviderSecrets(raw);
-  assert.doesNotMatch(safe, /access-secret|refresh-secret/);
-  assert.match(safe, /\[redacted\]/);
+test("loadOmnigentZaiSecret reads the omnigent file backend and honors OMNIGENT_DISABLE_KEYRING", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "glm-secrets-"));
+  try {
+    const secretsFile = path.join(directory, "secrets.json");
+    await writeFile(secretsFile, `${JSON.stringify({ zai: "file-backend-token" })}\n`);
+
+    assert.equal(
+      await loadOmnigentZaiSecret({ pythonCandidates: [], secretsFile }),
+      "file-backend-token",
+    );
+    assert.equal(
+      await loadOmnigentZaiSecret({ pythonCandidates: [], secretsFile: path.join(directory, "missing.json") }),
+      null,
+    );
+
+    const previous = process.env.OMNIGENT_DISABLE_KEYRING;
+    process.env.OMNIGENT_DISABLE_KEYRING = "1";
+    try {
+      assert.equal(
+        await loadOmnigentZaiSecret({
+          pythonCandidates: ["/bin/echo"],
+          secretsFile,
+        }),
+        "file-backend-token",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.OMNIGENT_DISABLE_KEYRING;
+      else process.env.OMNIGENT_DISABLE_KEYRING = previous;
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

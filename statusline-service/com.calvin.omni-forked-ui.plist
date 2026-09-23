@@ -2,20 +2,36 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>com.calvin.omni-forked-ui</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/calvinwilliamsjr/.volta/tools/image/node/24.19.0/bin/node</string>
-    <string>/Users/calvinwilliamsjr/Library/Application Support/omni-statusline/serve-forked-ui.mjs</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>/Users/calvinwilliamsjr/Library/Logs/omni-forked-ui.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/calvinwilliamsjr/Library/Logs/omni-forked-ui.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/niaopenclaw</string>
+		<key>OMNIGENT_FORKED_UI_DIAG</key>
+		<string>0</string>
+		<key>OMNIGENT_FORKED_UI_STATIC_ROOT</key>
+		<string>/Users/niaopenclaw/omnigent-recovery-source/omnigent/server/static/web-ui</string>
+		<key>OMNI_CODEX_BIN</key>
+		<string>/opt/homebrew/bin/codex</string>
+		<key>PATH</key>
+		<string>/Users/niaopenclaw/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.calvin.omni-forked-ui</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/niaopenclaw/.local/node24/bin/node</string>
+		<string>--max-http-header-size=65536</string>
+		<string>/Users/niaopenclaw/omnigent-statusline/serve-forked-ui.mjs</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/niaopenclaw/Library/Logs/omnigent-ui.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/niaopenclaw/Library/Logs/omnigent-ui.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/niaopenclaw</string>
 </dict>
 </plist>
