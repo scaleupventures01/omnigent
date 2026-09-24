@@ -144,6 +144,9 @@ _CODEX_HOME_COPY_FILES = ("config.toml",)
 # one real cache dedupes it across sessions; codex's own writes land in the
 # shared cache exactly as they would without the private home.
 _CODEX_HOME_SYMLINK_DIRS = (Path("plugins") / "cache",)
+# Reserved projection roots are created empty. Their contents are admitted
+# deliberately later instead of exposing the user's entire source directory.
+_CODEX_HOME_EMPTY_PROJECTION_DIRS = (Path("hooks"),)
 _CODEX_MINIMAL_CONFIG_ENV = "HARNESS_CODEX_MINIMAL_CONFIG"
 _CODEX_PROVIDER_CONFIG_PREFIX = "model_providers."
 
@@ -792,6 +795,9 @@ def _populate_codex_home_config(
             shutil.copy2(source_file, link_path)
 
     if not minimal_config:
+        for reldir in _CODEX_HOME_EMPTY_PROJECTION_DIRS:
+            (target_dir / reldir).mkdir(parents=True, exist_ok=True)
+
         for reldir in _CODEX_HOME_SYMLINK_DIRS:
             source_subdir = source_dir / reldir
             if not source_subdir.is_dir():
