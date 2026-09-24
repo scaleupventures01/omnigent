@@ -55,11 +55,15 @@ def bridge_root() -> Path:
     """
     Return the configured Codex-native bridge root.
 
-    Tests may monkeypatch :data:`_BRIDGE_ROOT` to isolate bridge files.
+    ``OMNIGENT_DATA_DIR`` relocates runtime state without requiring a symlink
+    below ``$HOME``. Tests may monkeypatch :data:`_BRIDGE_ROOT` to isolate
+    bridge files when the override is absent.
 
     :returns: Absolute root for Codex-native bridge directories, e.g.
         ``Path("~/.omnigent/codex-native")``.
     """
+    if data_dir := os.environ.get("OMNIGENT_DATA_DIR"):
+        return Path(data_dir).expanduser() / "codex-native"
     return _BRIDGE_ROOT
 
 
@@ -96,7 +100,7 @@ def bridge_dir_for_bridge_id(bridge_id: str) -> Path:
         ``~/.omnigent/codex-native``.
     """
     digest = hashlib.sha256(bridge_id.encode("utf-8")).hexdigest()[:32]
-    return _BRIDGE_ROOT / digest
+    return bridge_root() / digest
 
 
 def build_codex_native_spawn_env(

@@ -9,6 +9,8 @@ import pytest
 
 from omnigent.codex_native_bridge import (
     CodexNativeBridgeState,
+    bridge_dir_for_bridge_id,
+    bridge_root,
     cancel_pending_mcp_startup,
     clear_active_turn_id_if_matches,
     clear_bridge_state,
@@ -29,6 +31,21 @@ from omnigent.codex_native_bridge import (
     write_codex_config_model,
     write_policy_hook_config,
 )
+
+
+def test_bridge_root_honors_omnigent_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime state uses the configured data dir without following a home symlink."""
+    fallback = tmp_path / "home" / ".omnigent" / "codex-native"
+    monkeypatch.setattr("omnigent.codex_native_bridge._BRIDGE_ROOT", fallback)
+    monkeypatch.delenv("OMNIGENT_DATA_DIR", raising=False)
+    assert bridge_root() == fallback
+
+    data_dir = tmp_path / "ssd-state"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(data_dir))
+    assert bridge_root() == data_dir / "codex-native"
+    assert bridge_dir_for_bridge_id("bridge_test").parent == data_dir / "codex-native"
 
 
 def test_codex_mcp_config_overrides_isolate_the_bridge_interpreter(tmp_path: Path) -> None:
