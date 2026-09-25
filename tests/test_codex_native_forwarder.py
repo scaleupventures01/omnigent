@@ -2644,6 +2644,61 @@ async def test_delta_coalescer_worker_survives_an_already_settled_marker() -> No
     assert len(client.posts) > posts_before
 
 
+# ---------------------------------------------------------------------------
+# _thread_started_is_ephemeral
+# ---------------------------------------------------------------------------
+
+
+def _make_thread_started(thread: dict) -> dict:
+    """Wrap a thread dict in a ``thread/started`` envelope."""
+    return {"method": "thread/started", "params": {"thread": thread}}
+
+
+def test_thread_started_is_ephemeral_true_for_ephemeral_system_thread() -> None:
+    event = _make_thread_started(
+        {
+            "id": "0195aaaa-system",
+            "ephemeral": True,
+            "path": None,
+            "threadSource": "system",
+            "source": "vscode",
+        }
+    )
+    assert fwd._thread_started_is_ephemeral(event) is True
+
+
+def test_thread_started_is_ephemeral_false_for_persistent_clear_thread() -> None:
+    event = _make_thread_started(
+        {
+            "id": "0195bbbb-user-clear",
+            "ephemeral": False,
+            "path": "/rollout/0195bbbb.jsonl",
+            "threadSource": "user",
+        }
+    )
+    assert fwd._thread_started_is_ephemeral(event) is False
+
+
+def test_thread_started_is_ephemeral_false_when_ephemeral_absent() -> None:
+    event = _make_thread_started({"id": "0195cccc-no-ephemeral-key"})
+    assert fwd._thread_started_is_ephemeral(event) is False
+
+
+def test_thread_started_is_ephemeral_false_for_wrong_method() -> None:
+    event = {"method": "thread/updated", "params": {"thread": {"id": "t", "ephemeral": True}}}
+    assert fwd._thread_started_is_ephemeral(event) is False
+
+
+def test_thread_started_is_ephemeral_false_for_missing_params() -> None:
+    event = {"method": "thread/started"}
+    assert fwd._thread_started_is_ephemeral(event) is False
+
+
+def test_thread_started_is_ephemeral_false_for_missing_thread() -> None:
+    event = {"method": "thread/started", "params": {}}
+    assert fwd._thread_started_is_ephemeral(event) is False
+
+
 @pytest.mark.asyncio
 async def test_delta_coalescer_survives_a_cancelled_flush_caller() -> None:
     """A cancelled ``flush()`` caller must not kill the worker.
