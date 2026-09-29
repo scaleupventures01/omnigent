@@ -89,7 +89,15 @@ export function showNotification({
     return null;
   }
   if (!isNotificationSupported() || Notification.permission !== "granted") return null;
-  const notification = new Notification(title, { body, tag });
+  let notification: Notification;
+  try {
+    notification = new Notification(title, { body, tag });
+  } catch {
+    // Mobile Chromium and iOS Safari can report permission "granted" yet throw
+    // "Illegal constructor" for page-scoped notifications. Optional feature:
+    // fail closed instead of crashing the app.
+    return null;
+  }
   notification.onclick = () => {
     window.focus();
     onClick?.();
