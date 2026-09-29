@@ -74,6 +74,8 @@ if (typeof window !== "undefined") {
     const doc = document as Document & { wasDiscarded?: boolean };
     const cause = sessionStorage.getItem("omnigent:reload-cause");
     sessionStorage.removeItem("omnigent:reload-cause");
+    const prevUnload = sessionStorage.getItem("omnigent:unload");
+    sessionStorage.removeItem("omnigent:unload");
     const lastBoot = Number(sessionStorage.getItem("omnigent:last-boot-at")) || 0;
     const now = Date.now();
     sessionStorage.setItem("omnigent:last-boot-at", String(now));
@@ -88,6 +90,10 @@ if (typeof window !== "undefined") {
           wasDiscarded: doc.wasDiscarded ?? null,
           ourCause: cause,
           secondsSinceLastBoot: lastBoot ? Math.round((now - lastBoot) / 1000) : null,
+          // Set by the pagehide listener below. Missing on a reload means the
+          // old page never got pagehide: the renderer was killed, not unloaded.
+          cleanUnload: prevUnload ? JSON.parse(prevUnload) : null,
+          build: document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/index-"]')?.src.split("/").pop() ?? null,
           pathname: window.location.pathname,
           userAgent: navigator.userAgent,
         }),
@@ -96,6 +102,24 @@ if (typeof window !== "undefined") {
   } catch {
     // Diagnostics must never break boot.
   }
+  let hiddenAt: number | null = null;
+  document.addEventListener("visibilitychange", () => {
+    hiddenAt = document.visibilityState === "hidden" ? Date.now() : null;
+  });
+  window.addEventListener("pagehide", () => {
+    try {
+      sessionStorage.setItem(
+        "omnigent:unload",
+        JSON.stringify({
+          at: Date.now(),
+          visibility: document.visibilityState,
+          hiddenForSeconds: hiddenAt ? Math.round((Date.now() - hiddenAt) / 1000) : null,
+        }),
+      );
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+  });
 }
 
 // Single client at module scope — shared across the whole app.
