@@ -33,6 +33,30 @@ import "./index.css";
 // configured (VITE_OTEL_EXPORTER_OTLP_ENDPOINT).
 initBrowserTelemetry();
 
+// A tab still running an older build can ask for a lazy chunk a later deploy
+// removed. Vite dispatches `vite:preloadError` for that; reload once into the
+// current build instead of leaving the page broken. The timestamp guard stops
+// a reload loop if the chunk is missing from the current build too.
+if (typeof window !== "undefined") {
+  window.addEventListener("vite:preloadError", (event) => {
+    const key = "omnigent:chunk-reload-at";
+    let last = 0;
+    try {
+      last = Number(sessionStorage.getItem(key)) || 0;
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+    if (Date.now() - last < 30_000) return;
+    try {
+      sessionStorage.setItem(key, String(Date.now()));
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+    event.preventDefault();
+    window.location.reload();
+  });
+}
+
 // Single client at module scope — shared across the whole app.
 //
 // `refetchOnWindowFocus: false` is intentional: window-focus auto-refetch
