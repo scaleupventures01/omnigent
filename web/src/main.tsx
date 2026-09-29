@@ -53,8 +53,49 @@ if (typeof window !== "undefined") {
       // sessionStorage access errors are non-fatal.
     }
     event.preventDefault();
+    try {
+      sessionStorage.setItem("omnigent:reload-cause", "chunk-preload-error");
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
     window.location.reload();
   });
+}
+
+// Diagnostic: on every boot that follows a reload (or a browser tab discard),
+// report why to the forked UI's /__client-error log. Distinguishes our own
+// reloads (reload-cause set just before them) from the browser killing and
+// restoring the tab, which leaves no cause behind.
+if (typeof window !== "undefined") {
+  try {
+    const nav = performance.getEntriesByType("navigation")[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+    const doc = document as Document & { wasDiscarded?: boolean };
+    const cause = sessionStorage.getItem("omnigent:reload-cause");
+    sessionStorage.removeItem("omnigent:reload-cause");
+    const lastBoot = Number(sessionStorage.getItem("omnigent:last-boot-at")) || 0;
+    const now = Date.now();
+    sessionStorage.setItem("omnigent:last-boot-at", String(now));
+    if (nav?.type === "reload" || doc.wasDiscarded || cause) {
+      void fetch("/__client-error", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify({
+          name: "boot-diagnostic",
+          navType: nav?.type ?? null,
+          wasDiscarded: doc.wasDiscarded ?? null,
+          ourCause: cause,
+          secondsSinceLastBoot: lastBoot ? Math.round((now - lastBoot) / 1000) : null,
+          pathname: window.location.pathname,
+          userAgent: navigator.userAgent,
+        }),
+      }).catch(() => {});
+    }
+  } catch {
+    // Diagnostics must never break boot.
+  }
 }
 
 // Single client at module scope — shared across the whole app.

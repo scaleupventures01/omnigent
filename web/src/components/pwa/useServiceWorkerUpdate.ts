@@ -60,6 +60,11 @@ function start(): void {
   workbox.addEventListener("controlling", () => {
     if (reloading) return;
     reloading = true;
+    try {
+      sessionStorage.setItem("omnigent:reload-cause", "service-worker-controlling");
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
     window.location.reload();
   });
 
