@@ -1,23 +1,20 @@
 /**
- * Client-side attachment validation: which files can be attached, and how
- * large each type may be.
+ * Client-side attachment validation: which files can be attached.
  *
- * This mirrors the authoritative server-side checks in
- * omnigent/runtime/content_resolver.py (`attachment_upload_limit`) and the
- * upload route (415 for unsupported types, 413 for oversized). Keeping a
- * copy here lets us reject a bad file at paste/drop/pick time — before a
- * slow upload — with a friendly message. The server still enforces; this is
- * UX only. Keep the limits in sync with the Python constants.
+ * This mirrors the authoritative server-side type check in
+ * omnigent/runtime/content_resolver.py (`attachment_type_allowed`) and the
+ * upload route (415 for unsupported types). Keeping a copy here lets us
+ * reject a bad file at paste/drop/pick time, before a slow upload, with a
+ * friendly message. The server still enforces; this is UX only.
+ *
+ * There is deliberately NO size limit, client or server (Calvin, 2026-09-08:
+ * "remove it so i can upload whatever i want"). Two external ceilings still
+ * apply and surface at send time, not here: the model provider's per-request
+ * limit (attachments are inlined as base64), and Cloudflare's 100 MB request
+ * body limit in front of the public hostname.
  */
 
-/** Per-type upload size limits, in megabytes. Mirrors the server caps. */
-export const ATTACHMENT_SIZE_LIMITS_MB = {
-  image: 5,
-  pdf: 20,
-  text: 10,
-} as const;
-
-export type AttachmentCategory = keyof typeof ATTACHMENT_SIZE_LIMITS_MB;
+export type AttachmentCategory = "image" | "pdf" | "archive" | "office" | "text";
 
 const attachmentIds = new WeakMap<File, string>();
 let nextAttachmentId = 0;
@@ -112,6 +109,15 @@ const TEXT_CODE_EXTENSIONS = new Set([
   ".ipynb",
 ]);
 
+// Office / OpenDocument / RTF extensions whose browser-reported MIME is often
+// empty. Mirrors the Office MIME handling in content_resolver.py.
+const OFFICE_EXTENSIONS = new Set([
+  ".doc", ".docx", ".docm", ".dot", ".dotx",
+  ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx",
+  ".ppt", ".pptx", ".pptm", ".pps", ".ppsx", ".pot", ".potx",
+  ".odt", ".ods", ".odp", ".rtf",
+]);
+
 function extensionOf(filename: string): string {
   const dot = filename.lastIndexOf(".");
   return dot >= 0 ? filename.slice(dot).toLowerCase() : "";
@@ -129,6 +135,26 @@ export function classifyAttachment(file: File): AttachmentCategory | null {
 
   if (type.startsWith("image/")) return "image";
   if (type === "application/pdf" || ext === ".pdf") return "pdf";
+  if (
+    type === "application/zip" ||
+    type === "application/x-zip-compressed" ||
+    ext === ".zip"
+  ) {
+    return "archive";
+  }
+  // A text/code extension wins over an Office-looking MIME: Windows tags
+  // .csv as application/vnd.ms-excel and it must stay a text attachment.
+  if (
+    !TEXT_CODE_EXTENSIONS.has(ext) &&
+    (type.startsWith("application/vnd.openxmlformats-officedocument.") ||
+      type.startsWith("application/vnd.ms-") ||
+      type.startsWith("application/vnd.oasis.opendocument.") ||
+      type === "application/msword" ||
+      type === "application/rtf" ||
+      OFFICE_EXTENSIONS.has(ext))
+  ) {
+    return "office";
+  }
   if (
     type.startsWith("text/") ||
     TEXT_LIKE_APPLICATION_MIMES.has(type) ||
@@ -148,8 +174,7 @@ export interface AttachmentValidation {
 
 /**
  * Split *files* into accepted attachments and rejection messages. A file is
- * rejected when its type is unsupported, or when it exceeds the per-type
- * size limit.
+ * rejected only when its type is unsupported; there is no size check.
  */
 export function validateAttachments(files: File[]): AttachmentValidation {
   const accepted: File[] = [];
@@ -160,13 +185,8 @@ export function validateAttachments(files: File[]): AttachmentValidation {
     const category = classifyAttachment(file);
     if (category === null) {
       errors.push(
-        `"${name}" can't be attached — only images, PDF, and text/code files are supported.`,
+        `"${name}" can't be attached — only images, PDF, ZIP, Office, and text/code files are supported.`,
       );
-      continue;
-    }
-    const limitMb = ATTACHMENT_SIZE_LIMITS_MB[category];
-    if (file.size > limitMb * 1024 * 1024) {
-      errors.push(`"${name}" is too large — the limit for ${category} files is ${limitMb} MB.`);
       continue;
     }
     accepted.push(file);

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  ATTACHMENT_SIZE_LIMITS_MB,
   attachmentKey,
   classifyAttachment,
   validateAttachments,
@@ -47,15 +46,18 @@ describe("classifyAttachment", () => {
 
   it("rejects office/binary types", () => {
     const pptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-    expect(classifyAttachment(makeFile("deck.pptx", pptx))).toBeNull();
-    expect(classifyAttachment(makeFile("a.zip", "application/zip"))).toBeNull();
+    expect(classifyAttachment(makeFile("deck.pptx", pptx))).toBe("office");
+    expect(classifyAttachment(makeFile("deck.pptx", ""))).toBe("office");
+    expect(classifyAttachment(makeFile("a.xls", "application/vnd.ms-excel"))).toBe("office");
+    expect(classifyAttachment(makeFile("a.zip", "application/zip"))).toBe("archive");
+    expect(classifyAttachment(makeFile("a.zip", ""))).toBe("archive");
     expect(classifyAttachment(makeFile("a.bin", "application/octet-stream"))).toBeNull();
     expect(classifyAttachment(makeFile("a.mp4", "video/mp4"))).toBeNull();
   });
 });
 
 describe("validateAttachments", () => {
-  it("accepts supported files within their size limit", () => {
+  it("accepts supported files", () => {
     const files = [makeFile("a.png", "image/png"), makeFile("a.pdf", "application/pdf")];
     const { accepted, errors } = validateAttachments(files);
     expect(accepted).toHaveLength(2);
@@ -63,26 +65,25 @@ describe("validateAttachments", () => {
   });
 
   it("rejects unsupported types with a message", () => {
-    const pptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-    const { accepted, errors } = validateAttachments([makeFile("deck.pptx", pptx)]);
+    const { accepted, errors } = validateAttachments([makeFile("a.mp4", "video/mp4")]);
     expect(accepted).toHaveLength(0);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("deck.pptx");
+    expect(errors[0]).toContain("a.mp4");
   });
 
-  it("rejects files over their per-type size limit", () => {
-    const bigImage = makeFile("huge.png", "image/png", ATTACHMENT_SIZE_LIMITS_MB.image * MB + 1);
+  it("has no size limit: a 200 MB image is accepted", () => {
+    const bigImage = makeFile("huge.png", "image/png", 200 * MB);
     const { accepted, errors } = validateAttachments([bigImage]);
-    expect(accepted).toHaveLength(0);
-    expect(errors[0]).toContain("too large");
+    expect(accepted).toEqual([bigImage]);
+    expect(errors).toHaveLength(0);
   });
 
   it("partitions a mixed batch into accepted + errors", () => {
     const ok = makeFile("a.png", "image/png");
-    const badType = makeFile("a.zip", "application/zip");
-    const tooBig = makeFile("big.pdf", "application/pdf", ATTACHMENT_SIZE_LIMITS_MB.pdf * MB + 1);
-    const { accepted, errors } = validateAttachments([ok, badType, tooBig]);
-    expect(accepted).toEqual([ok]);
-    expect(errors).toHaveLength(2);
+    const badType = makeFile("a.mp4", "video/mp4");
+    const bigPdf = makeFile("big.pdf", "application/pdf", 200 * MB);
+    const { accepted, errors } = validateAttachments([ok, badType, bigPdf]);
+    expect(accepted).toEqual([ok, bigPdf]);
+    expect(errors).toHaveLength(1);
   });
 });

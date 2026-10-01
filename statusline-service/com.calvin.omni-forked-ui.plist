@@ -9,7 +9,7 @@
 		<key>OMNIGENT_FORKED_UI_DIAG</key>
 		<string>0</string>
 		<key>OMNIGENT_FORKED_UI_STATIC_ROOT</key>
-		<string>/Users/niaopenclaw/omnigent-recovery-source/omnigent/server/static/web-ui</string>
+		<string>/Users/niaopenclaw/Domains/infra/omnigent/omnigent/server/static/web-ui</string>
 		<key>OMNI_CODEX_BIN</key>
 		<string>/opt/homebrew/bin/codex</string>
 		<key>PATH</key>
