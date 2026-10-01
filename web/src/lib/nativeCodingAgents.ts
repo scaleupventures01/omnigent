@@ -256,6 +256,18 @@ export function isNativeCodingAgent(
 }
 
 /**
+ * Whether an agent is one of the canonical native-CLI picker wrappers.
+ *
+ * Custom agents may run on a native harness without becoming that harness's
+ * built-in wrapper. Their own identity and spec-level model must stay intact.
+ */
+export function isNativeCodingHarnessEntry(
+  agent: Pick<AvailableAgent, "name" | "harness"> | null | undefined,
+): boolean {
+  return nativeCodingAgentForAgentName(agent?.name) !== undefined;
+}
+
+/**
  * Whether a harness is fully supported — the maintained, end-to-end tested
  * integrations that lead the picker. Everything else (including non-native
  * agents) belongs in the "More" group regardless of host readiness.

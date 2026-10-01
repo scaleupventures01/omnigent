@@ -854,6 +854,15 @@ html:not(.dark) .conversations-sidebar {
   body:has(.app-shell) {
     overflow: hidden;
   }
+  /* Mobile Chromium browsers (Chrome, Samsung Internet) run pull-to-refresh
+   * when an inner scroller at its top keeps being dragged down and the
+   * overscroll chains to the root, so scrolling up through a chat reloads
+   * the page. Measured 2026-09-29: repeated navType=reload boots from
+   * Samsung Internet with no app-side cause. */
+  html:has(.app-shell),
+  body:has(.app-shell) {
+    overscroll-behavior-y: none;
+  }
   html {
     /* Font family for the whole inherited UI. Can't `@apply font-sans`: Tailwind
      * v4's `@theme inline` inlines the literal stack, so a runtime `--font-sans`

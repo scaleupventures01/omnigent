@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App.tsx";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { PWAUpdateBanner } from "./components/pwa/PWAUpdateBanner";
 import { ThemeProvider } from "./components/theme/ThemeProvider";
 import { TooltipProvider } from "./components/ui/tooltip";
@@ -32,6 +33,95 @@ import "./index.css";
 // and a trace begins in the browser. No-op unless a collector endpoint is
 // configured (VITE_OTEL_EXPORTER_OTLP_ENDPOINT).
 initBrowserTelemetry();
+
+// A tab still running an older build can ask for a lazy chunk a later deploy
+// removed. Vite dispatches `vite:preloadError` for that; reload once into the
+// current build instead of leaving the page broken. The timestamp guard stops
+// a reload loop if the chunk is missing from the current build too.
+if (typeof window !== "undefined") {
+  window.addEventListener("vite:preloadError", (event) => {
+    const key = "omnigent:chunk-reload-at";
+    let last = 0;
+    try {
+      last = Number(sessionStorage.getItem(key)) || 0;
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+    if (Date.now() - last < 30_000) return;
+    try {
+      sessionStorage.setItem(key, String(Date.now()));
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+    event.preventDefault();
+    try {
+      sessionStorage.setItem("omnigent:reload-cause", "chunk-preload-error");
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+    window.location.reload();
+  });
+}
+
+// Diagnostic: on every boot that follows a reload (or a browser tab discard),
+// report why to the forked UI's /__client-error log. Distinguishes our own
+// reloads (reload-cause set just before them) from the browser killing and
+// restoring the tab, which leaves no cause behind.
+if (typeof window !== "undefined") {
+  try {
+    const nav = performance.getEntriesByType("navigation")[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+    const doc = document as Document & { wasDiscarded?: boolean };
+    const cause = sessionStorage.getItem("omnigent:reload-cause");
+    sessionStorage.removeItem("omnigent:reload-cause");
+    const prevUnload = sessionStorage.getItem("omnigent:unload");
+    sessionStorage.removeItem("omnigent:unload");
+    const lastBoot = Number(sessionStorage.getItem("omnigent:last-boot-at")) || 0;
+    const now = Date.now();
+    sessionStorage.setItem("omnigent:last-boot-at", String(now));
+    if (nav?.type === "reload" || doc.wasDiscarded || cause) {
+      void fetch("/__client-error", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify({
+          name: "boot-diagnostic",
+          navType: nav?.type ?? null,
+          wasDiscarded: doc.wasDiscarded ?? null,
+          ourCause: cause,
+          secondsSinceLastBoot: lastBoot ? Math.round((now - lastBoot) / 1000) : null,
+          // Set by the pagehide listener below. Missing on a reload means the
+          // old page never got pagehide: the renderer was killed, not unloaded.
+          cleanUnload: prevUnload ? JSON.parse(prevUnload) : null,
+          build: document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/index-"]')?.src.split("/").pop() ?? null,
+          pathname: window.location.pathname,
+          userAgent: navigator.userAgent,
+        }),
+      }).catch(() => {});
+    }
+  } catch {
+    // Diagnostics must never break boot.
+  }
+  let hiddenAt: number | null = null;
+  document.addEventListener("visibilitychange", () => {
+    hiddenAt = document.visibilityState === "hidden" ? Date.now() : null;
+  });
+  window.addEventListener("pagehide", () => {
+    try {
+      sessionStorage.setItem(
+        "omnigent:unload",
+        JSON.stringify({
+          at: Date.now(),
+          visibility: document.visibilityState,
+          hiddenForSeconds: hiddenAt ? Math.round((Date.now() - hiddenAt) / 1000) : null,
+        }),
+      );
+    } catch {
+      // sessionStorage access errors are non-fatal.
+    }
+  });
+}
 
 // Single client at module scope — shared across the whole app.
 //
@@ -124,7 +214,9 @@ void bootProbe.then((info) => {
                   <SessionUpdatesProvider>
                     <RunnerHealthProvider>
                       <QueueFlushProvider>
-                        <App />
+                        <AppErrorBoundary>
+                          <App />
+                        </AppErrorBoundary>
                       </QueueFlushProvider>
                     </RunnerHealthProvider>
                   </SessionUpdatesProvider>

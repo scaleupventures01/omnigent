@@ -50,7 +50,7 @@ export interface FreshRateLimits {
   sevenDayResets: number;
 }
 
-export type ProviderId = "claude" | "chatgpt" | "kimi";
+export type ProviderId = "claude" | "chatgpt" | "glm";
 
 export interface ProviderUsageWindow {
   usedPercent: number;

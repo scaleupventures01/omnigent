@@ -327,7 +327,10 @@ export default defineConfig({
     // default baseline is Safari 16.4+; iPadOS 15 can't parse dep regex lookbehinds (#1978)
     target: ["chrome111", "edge111", "firefox114", "safari15", "ios15"],
     outDir: path.resolve(__dirname, "../omnigent/server/static/web-ui"),
-    emptyOutDir: true,
+    // Keep previous builds' hashed chunks: this outDir IS the live served
+    // directory, and tabs still running an older bundle lazy-load its chunks
+    // by exact filename. Emptying it 404s every open tab's next page change.
+    emptyOutDir: false,
     rollupOptions: {
       output: {
         manualChunks(id) {

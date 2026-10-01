@@ -117,6 +117,16 @@ describe("showNotification", () => {
     expect(showNotification({ title: "X" })).toBeNull();
   });
 
+  it("returns null instead of throwing when a granted constructor is illegal (mobile)", () => {
+    const ctor = vi.fn(function () {
+      throw new TypeError("Failed to construct 'Notification': Illegal constructor.");
+    }) as unknown as typeof Notification;
+    (ctor as unknown as { permission: NotificationPermission }).permission = "granted";
+    vi.stubGlobal("Notification", ctor);
+    expect(() => showNotification({ title: "X" })).not.toThrow();
+    expect(showNotification({ title: "X" })).toBeNull();
+  });
+
   it("focuses, runs onClick, and closes when clicked", () => {
     installNotification("granted");
     const focus = vi.spyOn(window, "focus").mockImplementation(() => {});

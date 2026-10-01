@@ -381,7 +381,7 @@ describe("Composer provider usage status", () => {
         fiveHour: null,
         weekly: { usedPercent: 78, resetsAt: 1_800_086_400 },
       },
-      kimi: {
+      glm: {
         fiveHour: { usedPercent: 90, resetsAt: 1_800_000_000 },
         weekly: { usedPercent: 23, resetsAt: 1_800_086_400 },
       },
@@ -426,21 +426,21 @@ describe("Composer provider usage status", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows headed Claude, ChatGPT, and Kimi usage sections in order with their own windows", async () => {
+  it("shows headed Claude, ChatGPT, and GLM usage sections in order with their own windows", async () => {
     renderComposer();
 
     const metrics = await screen.findByTestId("omni-metrics");
     const claude = within(metrics).getByTestId("provider-usage-claude");
     const chatgpt = within(metrics).getByTestId("provider-usage-chatgpt");
-    const kimi = within(metrics).getByTestId("provider-usage-kimi");
+    const glm = within(metrics).getByTestId("provider-usage-glm");
 
     expect(within(claude).getByText("Claude")).toBeVisible();
     expect(within(chatgpt).getByText("ChatGPT")).toBeVisible();
-    expect(within(kimi).getByText("Kimi")).toBeVisible();
+    expect(within(glm).getByText("GLM")).toBeVisible();
     expect(claude.compareDocumentPosition(chatgpt) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
-    expect(chatgpt.compareDocumentPosition(kimi) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+    expect(chatgpt.compareDocumentPosition(glm) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
 
@@ -448,27 +448,27 @@ describe("Composer provider usage status", () => {
     expect(claude).toHaveTextContent(/wk\s+34%/);
     expect(chatgpt).not.toHaveTextContent(/5h/);
     expect(chatgpt).toHaveTextContent(/wk\s+78%/);
-    expect(kimi).toHaveTextContent(/5h\s+90%/);
-    expect(kimi).toHaveTextContent(/wk\s+23%/);
+    expect(glm).toHaveTextContent(/5h\s+90%/);
+    expect(glm).toHaveTextContent(/wk\s+23%/);
 
     expect(metrics).toHaveTextContent(/Cash\s+\$8K/);
     expect(metrics).toHaveTextContent(/Goal\s+75%/);
     expect(metrics).toHaveTextContent(/Pipeline\s+11%/);
   });
 
-  it("shows n/a for a missing Kimi weekly window without hiding Claude or ChatGPT", async () => {
-    providerLimits.providers.kimi.weekly = null as never;
+  it("shows n/a for a missing GLM weekly window without hiding Claude or ChatGPT", async () => {
+    providerLimits.providers.glm.weekly = null as never;
     renderComposer();
 
     const metrics = await screen.findByTestId("omni-metrics");
     const claude = within(metrics).getByTestId("provider-usage-claude");
     const chatgpt = within(metrics).getByTestId("provider-usage-chatgpt");
-    const kimi = within(metrics).getByTestId("provider-usage-kimi");
+    const glm = within(metrics).getByTestId("provider-usage-glm");
 
     expect(claude).toHaveTextContent(/5h\s+12%.*wk\s+34%/);
     expect(chatgpt).not.toHaveTextContent(/5h/);
     expect(chatgpt).toHaveTextContent(/wk\s+78%/);
-    expect(kimi).toHaveTextContent(/5h\s+90%.*wk\s+n\/a/);
+    expect(glm).toHaveTextContent(/5h\s+90%.*wk\s+n\/a/);
   });
 });
 
