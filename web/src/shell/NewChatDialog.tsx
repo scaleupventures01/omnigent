@@ -129,12 +129,14 @@ import {
   type SmartRoutingUnavailableCause,
 } from "@/lib/smartRoutingAvailability";
 import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
+import { DEFAULT_GLM_MODEL, GLM_MODEL_OPTIONS, isGlmAgent, isGlmModel } from "@/lib/glmModels";
 import { partitionAgentsByKind, sortAgentsForDisplay } from "@/lib/agentGrouping";
 import { cn } from "@/lib/utils";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
 import {
   isFullySupportedNativeCodingAgent,
   isNativeCodingAgent,
+  isNativeCodingHarnessEntry,
   isRecentHarness,
   nativeAgentHasCapability,
   nativeCodingAgentForAvailableAgent,
@@ -1404,11 +1406,15 @@ function HarnessConfigModal({
   const info = useServerInfo();
   // Feature ON → single "needs setup" badge; OFF → per-reason original text.
   const collapsedBadge = info !== "loading" && info.harness_install_enabled;
-  const entryHarness = nativeCodingAgentForAvailableAgent(agent)?.harness ?? null;
-  const hasPermission = nativeAgentHasCapability(agent, "permissionMode");
-  const hasApproval = nativeAgentHasCapability(agent, "approvalMode");
-  const hasCursor = nativeAgentHasCapability(agent, "cursorMode");
-  const isCodex = entryHarness === "codex-native";
+  const nativeWrapper = isNativeCodingHarnessEntry(agent);
+  const entryHarness = nativeWrapper
+    ? (nativeCodingAgentForAvailableAgent(agent)?.harness ?? null)
+    : null;
+  const hasPermission = nativeWrapper && nativeAgentHasCapability(agent, "permissionMode");
+  const hasApproval = nativeWrapper && nativeAgentHasCapability(agent, "approvalMode");
+  const hasCursor = nativeWrapper && nativeAgentHasCapability(agent, "cursorMode");
+  const isCodex = nativeWrapper && entryHarness === "codex-native";
+  const isGlm = isGlmAgent(agent);
   const modelOptions = isCodex ? codexModelOptions : claudeModelOptions;
   const modelsLoading = isCodex ? codexModelsLoading : claudeModelsLoading;
   const brainDefault =
@@ -1493,7 +1499,9 @@ function HarnessConfigModal({
       onOpenChange(false);
       return;
     }
-    if (hasPermission) {
+    if (isGlm) {
+      setPickedModel(isGlmModel(draftModel) ? draftModel : DEFAULT_GLM_MODEL);
+    } else if (hasPermission) {
       // Order matters: commit model first (its setter clears routing when a
       // model is set), then routing (its setter clears the model when "on") —
       // the two setters enforce the mutual exclusion between them.
@@ -1566,6 +1574,34 @@ function HarnessConfigModal({
         </DialogHeader>
 
         <div className="flex flex-col gap-5 py-1">
+          {!autoRouting && isGlm && (
+            <ConfigRow label="Model" description="Underlying GLM model">
+              <Select
+                value={isGlmModel(draftModel) ? draftModel : DEFAULT_GLM_MODEL}
+                onValueChange={setDraftModel}
+              >
+                <SelectTrigger
+                  className="w-full cursor-pointer"
+                  data-testid="new-chat-landing-config-model"
+                  aria-label="Model"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent
+                  position="popper"
+                  align="start"
+                  className="w-(--radix-select-trigger-width) [&_[data-slot=select-item]]:pl-2.5"
+                >
+                  {GLM_MODEL_OPTIONS.map((model) => (
+                    <SelectItem key={model.id} value={model.id}>
+                      {model.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </ConfigRow>
+          )}
+
           {!autoRouting && hasPermission && (
             <>
               <ConfigRow label="Model" description="Underlying LLM">
@@ -1856,10 +1892,13 @@ export function NewChatLandingScreen() {
   // builtins/customs split: Polly & Debby are built-ins but belong under
   // "Agents", not "Harnesses".
   const harnessEntries = useMemo(
-    () => agentList.filter((a) => isNativeCodingAgent(a)),
+    () => agentList.filter((a) => isNativeCodingHarnessEntry(a)),
     [agentList],
   );
-  const agentEntries = useMemo(() => agentList.filter((a) => !isNativeCodingAgent(a)), [agentList]);
+  const agentEntries = useMemo(
+    () => agentList.filter((a) => !isNativeCodingHarnessEntry(a)),
+    [agentList],
+  );
 
   // "Create custom agent" dialog state and pending bundle. When the user
   // creates a custom agent via the dialog, the bundle input is stored
@@ -2429,14 +2468,21 @@ export function NewChatLandingScreen() {
         : agentList.find((a) => a.id === effectiveAgentId),
     [agentList, effectiveAgentId, pendingAgent],
   );
-  const supportsPermissionMode = nativeAgentHasCapability(selectedAgent, "permissionMode");
-  const supportsApprovalMode = nativeAgentHasCapability(selectedAgent, "approvalMode");
-  const supportsCursorMode = nativeAgentHasCapability(selectedAgent, "cursorMode");
+  const selectedGlmAgent = isGlmAgent(selectedAgent);
+  const selectedNativeWrapper = isNativeCodingHarnessEntry(selectedAgent);
+  const supportsPermissionMode =
+    selectedNativeWrapper && nativeAgentHasCapability(selectedAgent, "permissionMode");
+  const supportsApprovalMode =
+    selectedNativeWrapper && nativeAgentHasCapability(selectedAgent, "approvalMode");
+  const supportsCursorMode =
+    selectedNativeWrapper && nativeAgentHasCapability(selectedAgent, "cursorMode");
   const hideUnconfiguredHarnesses = useMemo(() => readHideUnconfiguredHarnesses(), []);
   // The selected native harness, used to persist/seed its option knobs (mode /
   // model / effort), which are harness-specific. null for non-native agents,
   // which have no knobs to remember.
-  const selectedNativeHarness = nativeCodingAgentForAvailableAgent(selectedAgent)?.harness ?? null;
+  const selectedNativeHarness = selectedNativeWrapper
+    ? (nativeCodingAgentForAvailableAgent(selectedAgent)?.harness ?? null)
+    : null;
   const selectedHost = allHosts.find((h) => h.host_id === selectedHostId);
   // Warn-only readiness signal for the agent picker: only meaningful when
   // a connected host is selected (a sandbox provisions its own tooling).
@@ -2470,6 +2516,7 @@ export function NewChatLandingScreen() {
   // brain harness qualify, as does any routing-eligible agent — Smart Routing
   // lives only in the modal, so an agent with just that still needs the gear.
   const selectedAgentHasKnobs =
+    selectedGlmAgent ||
     supportsPermissionMode ||
     supportsApprovalMode ||
     supportsCursorMode ||
@@ -2498,6 +2545,16 @@ export function NewChatLandingScreen() {
       // mirror it. Report the constant — never a mode left over in state from a
       // previously selected native harness.
       return [{ label: "Permissions", value: AUTO_PERMISSION_MODE.label }];
+    }
+    if (selectedGlmAgent) {
+      return [
+        {
+          label: "Model",
+          value:
+            GLM_MODEL_OPTIONS.find((model) => model.id === pickedModel)?.displayName ??
+            GLM_MODEL_OPTIONS[0].displayName,
+        },
+      ];
     }
     if (supportsPermissionMode) {
       const modelValue = routingOn
@@ -2563,6 +2620,7 @@ export function NewChatLandingScreen() {
     return routingRow;
   }, [
     smartRoutingHarnessSelected,
+    selectedGlmAgent,
     supportsPermissionMode,
     supportsApprovalMode,
     supportsCursorMode,
@@ -2579,6 +2637,13 @@ export function NewChatLandingScreen() {
     cursorExecMode,
     pickedHarness,
   ]);
+  // GLM has its own model vocabulary. Seed its default on every agent switch
+  // so a remembered Codex model can never leak into a GLM launch.
+  useEffect(() => {
+    if (selectedGlmAgent) setPickedModel(DEFAULT_GLM_MODEL);
+    // The agent id is intentional: returning to GLM starts from its default.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveAgentId, selectedGlmAgent]);
   // Reset per-agent-instance run-config that must not carry across an agent
   // change. The DANGEROUS Codex bypass re-opts-in per context (matching the
   // store's fork / agent-switch behavior; CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY
@@ -3341,10 +3406,19 @@ export function NewChatLandingScreen() {
       // exists" guard.
       const agent = agentList.find((a) => a.id === effectiveAgentId);
       const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
+      const nativeWrapperSelected = isNativeCodingHarnessEntry(agent);
       const nativeLabels = nativeWrapperLabelsForAgent(agent);
-      const agentSupportsPermissionMode = nativeAgentHasCapability(agent, "permissionMode");
-      const agentSupportsApprovalMode = nativeAgentHasCapability(agent, "approvalMode");
-      const agentSupportsCursorMode = nativeAgentHasCapability(agent, "cursorMode");
+      const agentSupportsPermissionMode =
+        nativeWrapperSelected && nativeAgentHasCapability(agent, "permissionMode");
+      const agentSupportsApprovalMode =
+        nativeWrapperSelected && nativeAgentHasCapability(agent, "approvalMode");
+      const agentSupportsCursorMode =
+        nativeWrapperSelected && nativeAgentHasCapability(agent, "cursorMode");
+      const glmModelOverride = isGlmAgent(agent)
+        ? isGlmModel(pickedModel)
+          ? pickedModel
+          : DEFAULT_GLM_MODEL
+        : undefined;
       // Smart Routing — server-side. The fully-auto harness always routes
       // (harness + model), so send "on" to keep the persisted state consistent
       // with the lit routing icon. Otherwise only send it when routing is
@@ -3514,10 +3588,12 @@ export function NewChatLandingScreen() {
             model_override:
               !smartRoutingHarnessSelected &&
               !routingOwnsModel &&
-              (agentSupportsPermissionMode || nativeAgent?.harness === "codex-native") &&
-              pickedModel
-                ? pickedModel
-                : undefined,
+              (glmModelOverride ??
+                (nativeWrapperSelected &&
+                (agentSupportsPermissionMode || nativeAgent?.harness === "codex-native") &&
+                pickedModel
+                  ? pickedModel
+                  : undefined)),
             reasoning_effort:
               !smartRoutingHarnessSelected &&
               !routingOwnsModel &&
@@ -3858,7 +3934,7 @@ export function NewChatLandingScreen() {
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/*,application/pdf,text/*,application/json"
+              accept="image/*,application/pdf,application/zip,text/*,application/json"
               className="hidden"
               data-testid="new-chat-landing-file-input"
               onChange={(e) => {

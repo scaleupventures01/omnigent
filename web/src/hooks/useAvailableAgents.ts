@@ -46,6 +46,7 @@ export interface AvailableAgent {
 }
 
 const DISPLAY_NAMES: Record<string, string> = {
+  glm: "GLM",
   // nessie is no longer seeded, but older deployments retain their row.
   nessie: "Nessie",
   polly: "Polly",
@@ -54,9 +55,9 @@ const DISPLAY_NAMES: Record<string, string> = {
 
 function displayNameForAgent(name: string, harness?: string | null): string {
   return (
-    nativeCodingAgentForHarness(harness)?.displayName ??
     nativeCodingAgentForAgentName(name)?.displayName ??
     DISPLAY_NAMES[name] ??
+    nativeCodingAgentForHarness(harness)?.displayName ??
     capitalizeAgentName(name)
   );
 }
