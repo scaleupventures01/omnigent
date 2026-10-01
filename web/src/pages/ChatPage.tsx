@@ -4179,7 +4179,7 @@ function ComposerStatusLine({
   const providerDefinitions: ReadonlyArray<{ id: ProviderId; label: string }> = [
     { id: "claude", label: "Claude" },
     { id: "chatgpt", label: "ChatGPT" },
-    { id: "kimi", label: "Kimi" },
+    { id: "glm", label: "GLM" },
   ];
 
   const providerSegments = providerDefinitions.map(({ id, label }) => {

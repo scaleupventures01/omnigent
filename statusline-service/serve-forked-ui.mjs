@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, createReadStream } from "node:fs";
-import { access, chmod, mkdir, readFile, rename, rmdir, stat, utimes, writeFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import { homedir } from "node:os";
@@ -18,23 +18,9 @@ const METRICS_PATH = "/statusline";
 const METRICS_TIMEOUT_MS = 3000;
 const PROVIDER_TIMEOUT_MS = 8000;
 const PROVIDER_CACHE_TTL_MS = 60_000;
-const KIMI_LOCK_STALE_MS = 5_000;
-const KIMI_LOCK_UPDATE_MS = KIMI_LOCK_STALE_MS / 2;
-const KIMI_LOCK_RETRY_MS = 500;
-const KIMI_LOCK_RETRY_COUNT = 120;
 const DIAGNOSTICS_ENABLED = process.env.OMNIGENT_FORKED_UI_DIAG === "1";
 const USER_HOME = homedir();
 const RATELIMITS_FILE = path.join(USER_HOME, ".claude", "statusline-ratelimits.json");
-const KIMI_CREDENTIALS_FILE = path.join(
-  USER_HOME,
-  ".kimi-code",
-  "credentials",
-  "kimi-code.json",
-);
-const KIMI_OAUTH_LOCK_TARGET = path.join(USER_HOME, ".kimi-code", "oauth", "kimi-code");
-const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
-const KIMI_TOKEN_URL = "https://auth.kimi.com/api/oauth/token";
-const KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const GLM_USAGE_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
 const GLM_SECRET_NAME = "zai";
 const OMNIGENT_KEYCHAIN_SERVICE = "omnigent";
@@ -461,27 +447,6 @@ async function readCodexUsage() {
   });
 }
 
-function credentialValue(credentials, snakeName, camelName) {
-  const value = credentials?.[snakeName] ?? credentials?.[camelName];
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function kimiCredentialsExpireAt(credentials) {
-  return epochSeconds(credentials?.expires_at ?? credentials?.expiresAt);
-}
-
-function kimiCredentialsExpireIn(credentials) {
-  return finiteNumber(credentials?.expires_in ?? credentials?.expiresIn);
-}
-
-function shouldRefreshKimiCredentials(credentials, nowSeconds = Date.now() / 1000) {
-  const expiresAt = kimiCredentialsExpireAt(credentials);
-  if (expiresAt == null) return false;
-  const expiresIn = kimiCredentialsExpireIn(credentials);
-  const threshold = Math.max(300, expiresIn != null && expiresIn > 0 ? expiresIn * 0.5 : 0);
-  return expiresAt - nowSeconds < threshold;
-}
-
 async function fetchJson(url, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
@@ -492,170 +457,6 @@ async function fetchJson(url, options) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-async function reclaimStaleKimiCredentialLock(
-  lockDirectory,
-  {
-    nowMs = Date.now(),
-    staleMs = KIMI_LOCK_STALE_MS,
-    settle = () => new Promise((resolve) => setTimeout(resolve, 50)),
-  } = {},
-) {
-  let first;
-  try {
-    first = await stat(lockDirectory);
-  } catch (error) {
-    if (error?.code === "ENOENT") return true;
-    throw error;
-  }
-  if (nowMs - first.mtimeMs <= staleMs) return false;
-
-  await settle();
-  let second;
-  try {
-    second = await stat(lockDirectory);
-  } catch (error) {
-    if (error?.code === "ENOENT") return true;
-    throw error;
-  }
-  const unchanged =
-    first.dev === second.dev && first.ino === second.ino && first.mtimeMs === second.mtimeMs;
-  if (!unchanged || nowMs - second.mtimeMs <= staleMs) return false;
-
-  const staleDirectory = `${lockDirectory}.stale-${process.pid}-${Date.now()}`;
-  try {
-    await rename(lockDirectory, staleDirectory);
-  } catch (error) {
-    if (error?.code === "ENOENT") return true;
-    throw error;
-  }
-  await rmdir(staleDirectory).catch(() => {});
-  return true;
-}
-
-async function acquireKimiCredentialLock() {
-  const lockDirectory = `${KIMI_OAUTH_LOCK_TARGET}.lock`;
-  await mkdir(path.dirname(KIMI_OAUTH_LOCK_TARGET), { recursive: true });
-  await writeFile(KIMI_OAUTH_LOCK_TARGET, "", { flag: "a", mode: 0o600 });
-
-  for (let attempt = 0; attempt < KIMI_LOCK_RETRY_COUNT; attempt += 1) {
-    try {
-      await mkdir(lockDirectory, { mode: 0o700 });
-      const acquired = await stat(lockDirectory);
-      const heartbeat = setInterval(() => {
-        void stat(lockDirectory)
-          .then((current) => {
-            if (current.dev !== acquired.dev || current.ino !== acquired.ino) return;
-            const now = new Date();
-            return utimes(lockDirectory, now, now);
-          })
-          .catch(() => {});
-      }, KIMI_LOCK_UPDATE_MS);
-      heartbeat.unref();
-
-      return async () => {
-        clearInterval(heartbeat);
-        try {
-          const current = await stat(lockDirectory);
-          if (current.dev === acquired.dev && current.ino === acquired.ino) {
-            await rmdir(lockDirectory);
-          }
-        } catch (error) {
-          if (error?.code !== "ENOENT") throw error;
-        }
-      };
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      if (await reclaimStaleKimiCredentialLock(lockDirectory)) continue;
-      await new Promise((resolve) => setTimeout(resolve, KIMI_LOCK_RETRY_MS));
-    }
-  }
-  throw new Error("Timed out waiting for the Kimi OAuth credential lock");
-}
-
-async function refreshKimiCredentials(credentials) {
-  const refreshToken = credentialValue(credentials, "refresh_token", "refreshToken");
-  if (!refreshToken) throw new Error("Kimi refresh token is unavailable");
-
-  const refreshed = await fetchJson(KIMI_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: KIMI_CLIENT_ID,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-  });
-  const accessToken = credentialValue(refreshed, "access_token", "accessToken");
-  if (!accessToken) throw new Error("Kimi token refresh returned no access token");
-
-  const next = {
-    ...credentials,
-    access_token: accessToken,
-    refresh_token: credentialValue(refreshed, "refresh_token", "refreshToken") ?? refreshToken,
-  };
-  const expiresIn = finiteNumber(refreshed?.expires_in ?? refreshed?.expiresIn);
-  if (expiresIn != null) next.expires_at = Math.floor(Date.now() / 1000 + expiresIn);
-
-  const temporaryFile = `${KIMI_CREDENTIALS_FILE}.${process.pid}.tmp`;
-  await writeFile(temporaryFile, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  await chmod(temporaryFile, 0o600);
-  await rename(temporaryFile, KIMI_CREDENTIALS_FILE);
-  await chmod(KIMI_CREDENTIALS_FILE, 0o600);
-  return next;
-}
-
-async function currentKimiCredentials() {
-  let credentials = JSON.parse(await readFile(KIMI_CREDENTIALS_FILE, "utf8"));
-  if (!shouldRefreshKimiCredentials(credentials)) return credentials;
-
-  const releaseLock = await acquireKimiCredentialLock();
-  try {
-    credentials = JSON.parse(await readFile(KIMI_CREDENTIALS_FILE, "utf8"));
-    if (!shouldRefreshKimiCredentials(credentials)) return credentials;
-    return await refreshKimiCredentials(credentials);
-  } finally {
-    await releaseLock();
-  }
-}
-
-async function readKimiUsage() {
-  const credentials = await currentKimiCredentials();
-  const accessToken = credentialValue(credentials, "access_token", "accessToken");
-  if (!accessToken) throw new Error("Kimi access token is unavailable");
-
-  const payload = await fetchJson(KIMI_USAGE_URL, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  return normalizeKimiUsagePayload(payload);
-}
-
-function normalizeKimiUsagePayload(payload) {
-  const limits = Array.isArray(payload?.limits) ? payload.limits : [];
-  const fiveHour = limits.find(
-    (row) =>
-      (Number(row?.window?.duration) === 5 && row?.window?.unit === "hour") ||
-      (Number(row?.window?.duration) === 300 &&
-        row?.window?.timeUnit === "TIME_UNIT_MINUTE"),
-  );
-  const weekly = limits.find((row) => row?.window?.unit === "week");
-  const normalizeRow = (row) => {
-    const detail = row?.detail ?? row;
-    const limit = finiteNumber(detail?.limit);
-    const remaining = finiteNumber(detail?.remaining);
-    const used = finiteNumber(detail?.used) ??
-      (limit != null && remaining != null ? limit - remaining : null);
-    if (used == null || limit == null || limit <= 0) return null;
-    return usageWindow(
-      Math.round(Math.min(1, Math.max(0, used / limit)) * 100),
-      row?.reset_at ?? detail?.resetTime,
-    );
-  };
-  return {
-    fiveHour: normalizeRow(fiveHour),
-    weekly: normalizeRow(weekly) ?? normalizeRow(payload?.usage),
-  };
 }
 
 function createProviderRateLimitCollector({
@@ -731,13 +532,10 @@ export const __providerUsageTest = Object.freeze({
   normalizeClaudeUsage,
   normalizeCodexRateLimits,
   normalizeGlmUsagePayload,
-  normalizeKimiUsagePayload,
   parseCodexJsonLines,
   readGlmUsage,
-  reclaimStaleKimiCredentialLock,
   redactProviderSecrets,
   resolveCodexBinary,
-  shouldRefreshKimiCredentials,
 });
 
 async function serveRateLimits(_request, response) {
